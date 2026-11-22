@@ -1,7 +1,7 @@
 # Wacayoub MultiBoot
 
 Gestionnaire multiboot pour Enigma2, inspiré du « Multiboot Manager » d'Octagon (fonctions seulement, code écrit de zéro).
-Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.0.0_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
+Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.0.1_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
 
 Ouverture : Menu Plugins, menu Extensions, ou Menu > Système.
 
@@ -9,7 +9,7 @@ Ouverture : Menu Plugins, menu Extensions, ou Menu > Système.
 
 | Touche | Action |
 |---|---|
-| OK | Actions du slot : démarrer, démarrer **une seule fois** (retour automatique), installer, sauvegarder, taille, supprimer |
+| OK | Actions du slot : démarrer, démarrer **une seule fois** (retour automatique sur l'image d'avant), installer, sauvegarder, taille, supprimer |
 | Vert | Démarrer sur le slot choisi (puis propose de redémarrer) |
 | Jaune | Installer une image : **Images en ligne** (OpenATV, OpenPLi, OpenViX, OpenBH, OpenSPA, EGAMI, teamBlue, filtrées pour le modèle détecté), une URL, ou un zip / une sauvegarde `.tar.gz` sur les disques |
 | Bleu | Sauvegarder le slot en `.tar.gz` dans `<disque>/WMultiBoot/backups` (restaurable avec Jaune) |
@@ -28,6 +28,12 @@ Polices : Roboto / Liberation / DejaVu si l'image les a, sinon la police `Regula
 - Le slot choisi pour le prochain démarrage ne peut pas être supprimé.
 - Toute erreur de l'interface affiche un message au lieu de planter Enigma2 ; journal : `/tmp/wmultiboot.log`.
 
+## Démarrage « une seule fois » (HDD/USB)
+
+Le plugin écrit `ONCE=1` dans `boot.conf` et dépose dans l'image choisie un petit script `/etc/rcS.d/S99wmbreturn`
+qui remet l'ancien choix de démarrage puis s'efface. Si ce script ne peut pas tourner, omb-init renvoie de toute façon
+sur la flash : la box ne reste jamais bloquée.
+
 ## Récepteurs et structures pris en charge
 
 Détection automatique, dans cet ordre :
@@ -40,7 +46,8 @@ Détection automatique, dans cet ordre :
 | **Dreambox** | DM900/920, One/Two | menu Dreambox | — | affichage + sauvegarde |
 | **Sans multiboot / inconnu** | toute autre box | — | — | affichage + sauvegarde, aucun plantage |
 
-Testé en vrai : Vu+ Zero 4K, OpenATV 8.0.1 (structure omb-init). Les structures STARTUP et OpenMultiboot sont testées
+Testé en vrai : Vu+ Zero 4K, OpenATV 8.0.1 (structure omb-init) — image OpenPLi 9.2 téléchargée depuis la liste en ligne,
+installée sur le HDD, démarrée « une seule fois », puis retour automatique sur OpenATV 8.0.1 (22/11/2026). Les structures STARTUP et OpenMultiboot sont testées
 sur des données simulées (`tests/box_tests.py`), pas encore sur une vraie GigaBlue/Octagon/Zgemma.
 
 ## Tests

@@ -23,7 +23,7 @@ import threading
 import time
 import zipfile
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 LOG_FILE = "/tmp/wmultiboot.log"
 DATA_DIR = "WMultiBoot"                     # <device>/WMultiBoot/{downloads,backups,tmp}
 CHROOT_BASES = ("OnlineMultiBoot/images", "open-multiboot", "ImageBoot", "WMultiBoot/images")
@@ -746,11 +746,22 @@ class ChrootLayout(Layout):
             if not os.path.isdir(conf_dir):
                 os.makedirs(conf_dir)
             path = os.path.join(conf_dir, "boot.conf")
+            previous = read_file(path)
+            if slot.root and slot.kind != "flash":
+                if once:
+                    guard_not_running(slot)
+                    install_return_hook(slot.root, previous, self.probe.device)
+                else:
+                    remove_return_hook(slot.root)
             write_file(path, text)
             if read_file(path) != text:
                 raise MBError("Vérification de l'écriture impossible.")
-        job.say("Prochain démarrage : %s%s" % (slot.title(), " (une seule fois)" if once else ""), 100)
-        return "Prochain démarrage : %s%s." % (slot.title(), " (une seule fois)" if once else "")
+        back = ""
+        if once:
+            prev_slot = self.running_slot()
+            back = " (une seule fois, retour ensuite sur %s)" % (prev_slot.title() if prev_slot else "l'image actuelle")
+        job.say("Prochain démarrage : %s%s" % (slot.title(), back), 100)
+        return "Prochain démarrage : %s%s." % (slot.title(), back)
 
     def install_targets(self):
         return [st for st in storages() if st["linux"] and st["rw"]]
@@ -1508,6 +1519,47 @@ def extract_rootfs(job, tarball, dest, box):
             remove_quiet(part)
             job.cancellable = True
     return dest
+
+
+RETURN_HOOK = "etc/rcS.d/S99wmbreturn"
+RETURN_CONF = "etc/wmb-return.conf"
+RETURN_SCRIPT = """#!/bin/sh
+# Wacayoub MultiBoot - one-shot boot: put back the previous boot choice, then remove itself.
+# (omb-init already emptied boot.conf because ONCE=1, so if this script cannot run the
+# receiver simply returns to the flash image.)
+DEV="%(dev)s"
+M=/var/volatile/wmb-return
+mkdir -p $M
+if [ -b "$DEV" ] && mount -t ext4 "$DEV" $M 2>/dev/null; then
+	if [ -x $M/sbin/omb-init ] && [ -f /%(conf)s ]; then
+		cp /%(conf)s $M/etc/omb/boot.conf.wmb && mv $M/etc/omb/boot.conf.wmb $M/etc/omb/boot.conf
+		sync
+		echo "[WMB] previous boot choice restored" > /dev/kmsg 2>/dev/null
+	fi
+	umount $M 2>/dev/null || umount -l $M
+fi
+rmdir $M 2>/dev/null
+rm -f /%(conf)s /%(hook)s
+exit 0
+"""
+
+
+def install_return_hook(slot_root, previous_conf, flash_dev):
+    """Make a 'boot once' come back to the image that was selected before."""
+    if not flash_dev or not re.match(r"^/dev/[\w/.-]+$", flash_dev):
+        raise MBError("Partition flash inconnue : démarrage unique impossible.")
+    rcs = os.path.join(slot_root, "etc/rcS.d")
+    if not os.path.isdir(rcs):
+        raise MBError("Cette image n'utilise pas /etc/rcS.d : démarrage unique impossible.")
+    write_file(os.path.join(slot_root, RETURN_CONF), previous_conf)
+    hook = os.path.join(slot_root, RETURN_HOOK)
+    write_file(hook, RETURN_SCRIPT % {"dev": flash_dev, "conf": RETURN_CONF, "hook": RETURN_HOOK})
+    os.chmod(hook, 0o755)
+
+
+def remove_return_hook(slot_root):
+    for rel in (RETURN_HOOK, RETURN_CONF):
+        remove_quiet(os.path.join(slot_root, rel))
 
 
 def fix_chroot_slot(dest, name):
