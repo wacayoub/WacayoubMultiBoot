@@ -1,9 +1,21 @@
 # Wacayoub MultiBoot
 
 Gestionnaire multiboot pour Enigma2, inspiré du « Multiboot Manager » d'Octagon (fonctions seulement, code écrit de zéro).
-Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.0.1_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
+Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.1.0_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
 
 Ouverture : Menu Plugins, menu Extensions, ou Menu > Système.
+
+## Nouveautés 1.1.0
+
+- Interface moderne : logo de chaque image (tuiles OpenATV, OpenPLi, OpenViX, OpenBH, OpenSPA, EGAMI…), icônes Lucide,
+  pastilles d'état (EN COURS, PROCHAIN DÉMARRAGE, UNE FOIS, VIDE), menus en plein écran avec icônes.
+  Les logos sont des tuiles dessinées par nous (couleur + nom court), pas les logos officiels.
+- Espace disque : place restante et « place pour environ N nouvelles images » (~800 Mo par image), affichés partout ;
+  refus clair s'il faut libérer de la place.
+- Sauvegardes (touche BLEUE) : sauvegarde complète d'une image, sauvegarde « réglages et chaînes » seule, liste des
+  sauvegardes, restauration comme nouvelle image, restauration des réglages dans une autre image, suppression.
+- Plus simple : après une installation, le plugin propose de copier vos chaînes et favoris dans la nouvelle image,
+  puis de démarrer dessus une fois pour l'essayer. Une ligne d'aide en bas change selon l'image choisie.
 
 ## Fonctions
 
@@ -12,7 +24,7 @@ Ouverture : Menu Plugins, menu Extensions, ou Menu > Système.
 | OK | Actions du slot : démarrer, démarrer **une seule fois** (retour automatique sur l'image d'avant), installer, sauvegarder, taille, supprimer |
 | Vert | Démarrer sur le slot choisi (puis propose de redémarrer) |
 | Jaune | Installer une image : **Images en ligne** (OpenATV, OpenPLi, OpenViX, OpenBH, OpenSPA, EGAMI, teamBlue, filtrées pour le modèle détecté), une URL, ou un zip / une sauvegarde `.tar.gz` sur les disques |
-| Bleu | Sauvegarder le slot en `.tar.gz` dans `<disque>/WMultiBoot/backups` (restaurable avec Jaune) |
+| Bleu | Sauvegardes : complète ou réglages seuls, liste, restaurer, supprimer (`<disque>/WMultiBoot/backups`) |
 | Rouge | Supprimer un slot |
 | MENU | Actualiser, espace disque, journal, aide |
 

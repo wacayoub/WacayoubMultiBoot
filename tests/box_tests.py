@@ -452,6 +452,45 @@ def t_catalog_parse():
     expect_error(lambda: core.fetch_catalog(FakeJob("t"), "inconnu"), "inconnu")
 
 
+def t_backups_settings_channels():
+    z = make_zip("/media/wmbtest/chan.zip", rootfs=make_rootfs())
+    lay = chroot_layout()
+    job = FakeJob("i")
+    lay.install(job, z, target=target("/media/wmbtest"))
+    assert job.new_root and os.path.isdir(job.new_root)
+    lay = chroot_layout()
+    slot = [s for s in lay.slots if s.root == job.new_root][0]
+    # copy channels of the running image into the test slot
+    core.copy_channels(FakeJob("c"), slot)
+    assert os.path.isfile(job.new_root + "/etc/enigma2/lamedb") or os.path.isfile(job.new_root + "/etc/enigma2/lamedb5")
+    assert os.path.isfile(job.new_root + "/etc/enigma2/bouquets.tv")
+    # never into the running slot
+    expect_error(lambda: core.copy_channels(FakeJob("c"), lay.running_slot()), "en cours")
+    # settings backup of the test slot, then restore into it
+    core.backup_settings(FakeJob("b"), slot, "/media/wmbtest", lay)
+    bk = [b for b in core.list_backups() if b["mount"] == "/media/wmbtest" and b["kind"] == "settings"]
+    assert len(bk) == 1, bk
+    os.remove(job.new_root + "/etc/enigma2/bouquets.tv")
+    core.restore_settings(FakeJob("r"), bk[0]["path"], slot)
+    assert os.path.isfile(job.new_root + "/etc/enigma2/bouquets.tv")
+    expect_error(lambda: core.restore_settings(FakeJob("r"), bk[0]["path"], lay.running_slot()), "en cours")
+    # malicious settings archive (path traversal) is refused
+    evil = "/media/wmbtest/WMultiBoot/backups/reglages-evil.tar.gz"
+    with tarfile.open(evil, "w:gz") as t:
+        ti = tarfile.TarInfo("./etc/enigma2/../../../etc/passwd"); ti.size = 1
+        t.addfile(ti, io.BytesIO(b"x"))
+    expect_error(lambda: core.restore_settings(FakeJob("r"), evil, slot), "refusée")
+    # delete backups: only real backup files
+    expect_error(lambda: core.delete_backup("/etc/passwd"), "pas une sauvegarde")
+    core.delete_backup(evil)
+    core.delete_backup(bk[0]["path"])
+    assert not [b for b in core.list_backups() if b["mount"] == "/media/wmbtest"]
+    caps = dict((st["mount"], n) for st, n in core.install_capacity())
+    assert "/media/wmbtest" in caps and caps["/media/wmbtest"] >= 0
+    assert core.distro_key("OpenPLi") == "openpli" and core.distro_key("??") == "unknown"
+    lay.delete(FakeJob("d"), slot)
+
+
 def t_no_temp_mounts_left():
     out = core.read_file("/proc/mounts")
     assert "wmb-mnt" not in out, out
@@ -461,7 +500,7 @@ TESTS = [t_detect_real, t_running_guards, t_install_backup_restore_delete, t_loc
          t_corrupt_zip, t_truncated_zip, t_crc_damaged_zip, t_corrupt_rootfs_in_zip, t_zip_without_rootfs,
          t_wrong_box_zip, t_full_disk_precheck, t_full_disk_during_extract, t_backup_full_disk,
          t_cancel_install, t_bad_urls, t_unknown_box, t_no_multiboot_no_slots, t_startup_layout,
-         t_omb_classic_layout, t_catalog_parse, t_no_temp_mounts_left]
+         t_omb_classic_layout, t_catalog_parse, t_backups_settings_channels, t_no_temp_mounts_left]
 
 if __name__ == "__main__":
     flash_conf_before = None

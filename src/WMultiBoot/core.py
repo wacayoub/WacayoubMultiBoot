@@ -23,7 +23,7 @@ import threading
 import time
 import zipfile
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 LOG_FILE = "/tmp/wmultiboot.log"
 DATA_DIR = "WMultiBoot"                     # <device>/WMultiBoot/{downloads,backups,tmp}
 CHROOT_BASES = ("OnlineMultiBoot/images", "open-multiboot", "ImageBoot", "WMultiBoot/images")
@@ -442,6 +442,7 @@ class Job(object):
         self.cancelled = False
         self.cancellable = True
         self.proc = None
+        self.new_root = None
         self._lock = threading.Lock()
 
     def say(self, msg, progress=None):
@@ -783,6 +784,7 @@ class ChrootLayout(Layout):
             for f in cleanup:
                 remove_quiet(f)
         fix_chroot_slot(dest, os.path.basename(dest))
+        job.new_root = dest
         warn = modules_warning(dest, self.box)
         msg = "Image installée : %s" % os.path.basename(dest)
         if warn:
@@ -885,6 +887,7 @@ class OmbClassicLayout(Layout):
                 os.makedirs(kd)
             shutil.copyfile(kernel, os.path.join(kd, os.path.basename(dest) + ".bin"))
             sync()
+            job.new_root = dest
         finally:
             for f in cleanup:
                 remove_quiet(f)
@@ -1725,6 +1728,166 @@ def backup_tree(job, slot, dest_mount, layout=None):
     finally:
         if mount_ctx:
             mount_ctx.__exit__(None, None, None)
+
+
+# --------------------------------------------------------------------------- space, backups, settings
+
+SLOT_ESTIMATE_MB = 800          # a fresh image is 200-500 MB, it grows with plugins/picons/EPG
+
+
+def install_capacity():
+    """[(storage, number of images that still fit)] for disks that can hold new slots."""
+    out = []
+    for st in storages():
+        if st["linux"] and st["rw"]:
+            out.append((st, max(0, (st["free"] - 200) // SLOT_ESTIMATE_MB)))
+    return out
+
+
+DISTRO_KEYS = ("openatv", "openpli", "openvix", "openbh", "openspa", "egami", "teamblue", "openhdf",
+               "pure2", "openvision", "opendroid", "satlodge", "dreamos")
+
+
+def distro_key(name):
+    n = (name or "").lower().replace(" ", "")
+    for k in DISTRO_KEYS:
+        if k in n:
+            return k
+    return "unknown"
+
+
+def list_backups():
+    """[{path, name, size, date, kind}] newest first; kind = 'slot' | 'settings'."""
+    out = []
+    for st in storages():
+        d = os.path.join(st["mount"], DATA_DIR, "backups")
+        try:
+            names = os.listdir(d)
+        except Exception:
+            continue
+        for n in names:
+            p = os.path.join(d, n)
+            if not n.endswith(".tar.gz") or not os.path.isfile(p):
+                continue
+            try:
+                size, mtime = os.path.getsize(p), os.path.getmtime(p)
+            except Exception:
+                continue
+            out.append({"path": p, "name": n, "size": size // MB, "mtime": mtime, "mount": st["mount"],
+                        "date": time.strftime("%d/%m/%Y %H:%M", time.localtime(mtime)),
+                        "kind": "settings" if n.startswith("reglages-") else "slot"})
+    out.sort(key=lambda b: -b["mtime"])
+    return out
+
+
+def delete_backup(path):
+    rp = os.path.realpath(path)
+    if not re.search(r"/%s/backups/[^/]+\.tar\.gz$" % DATA_DIR, rp) or not os.path.isfile(rp):
+        raise MBError("Ce fichier n'est pas une sauvegarde Wacayoub MultiBoot.")
+    os.remove(rp)
+    sync()
+
+
+SETTINGS_DIRS = ("etc/enigma2", "etc/tuxbox")
+CHANNEL_FILES = re.compile(r"^(lamedb5?|bouquets\.(tv|radio)|userbouquet\..+\.(tv|radio)|alternatives\..+|"
+                           r"blacklist|whitelist)$")
+
+
+def _slot_root_ctx(slot, layout, rw=False):
+    """Context manager giving a readable (or writable) root for a slot."""
+    if slot.root and os.path.isdir(slot.root):
+        class _C(object):
+            def __enter__(s):
+                return slot.root
+
+            def __exit__(s, *a):
+                return False
+        return _C()
+    if slot.kind == "flash" and layout and layout.probe.device:
+        return TempMount(layout.probe.device, rw=rw)
+    raise MBError("Contenu du slot inaccessible.")
+
+
+def backup_settings(job, slot, dest_mount, layout=None):
+    """Small archive with only the settings, channels and bouquets of a slot."""
+    if not dest_mount:
+        raise MBError("Aucun disque de sauvegarde disponible.")
+    free, _ = fs_usage(dest_mount)
+    if free < 100:
+        raise MBError("Espace insuffisant sur %s (%s libres)." % (dest_mount, human_mb(free)))
+    with _slot_root_ctx(slot, layout) as root:
+        dirs = [d for d in SETTINGS_DIRS if os.path.isdir(os.path.join(root, d))]
+        if not dirs:
+            raise MBError("Aucun réglage trouvé dans ce slot.")
+        d = work_dir(dest_mount, "backups")
+        label = sanitize((slot.info or {}).get("label", "slot"))
+        final = os.path.join(d, "reglages-%s-%s.tar.gz" % (label, time.strftime("%Y%m%d-%H%M")))
+        part = final + ".partial"
+        job.say("Sauvegarde des réglages et des chaînes…", 20)
+        rc, out = run(["tar", "-czf", part, "--exclude=./etc/enigma2/epg.dat",
+                       "--exclude=*backup*", "--exclude=*.bak"] + ["./" + x for x in dirs], timeout=600, cwd=root)
+        if rc not in (0, 1) or not os.path.isfile(part):
+            remove_quiet(part)
+            raise MBError("Échec de la sauvegarde des réglages : %s" % out.strip()[-160:])
+        os.rename(part, final)
+        sync()
+    size = os.path.getsize(final) // MB
+    job.say("Réglages sauvegardés (%s)." % human_mb(max(1, size)), 100)
+    return "Réglages sauvegardés :\n%s" % final
+
+
+def _writable_slot_root(slot):
+    guard_not_running(slot)
+    if slot.kind not in ("chroot", "omb") or not slot.root or not os.path.isdir(slot.root):
+        raise MBError("Cette action n'est possible que sur une image installée sur HDD/USB.")
+    return slot.root
+
+
+def copy_channels(job, dest_slot, src_root="/"):
+    """Copy channel list, bouquets and satellites of the running image into another slot."""
+    dest = _writable_slot_root(dest_slot)
+    src_e2 = os.path.join(src_root, "etc/enigma2")
+    names = [n for n in os.listdir(src_e2) if CHANNEL_FILES.match(n) and os.path.isfile(os.path.join(src_e2, n))]
+    if not any(n.startswith("lamedb") for n in names):
+        raise MBError("Aucune liste de chaînes trouvée dans l'image en cours.")
+    dst_e2 = os.path.join(dest, "etc/enigma2")
+    if not os.path.isdir(dst_e2):
+        os.makedirs(dst_e2)
+    job.say("Copie de %d fichiers de chaînes…" % len(names), 30)
+    for n in names:
+        shutil.copyfile(os.path.join(src_e2, n), os.path.join(dst_e2, n))
+    tux = os.path.join(src_root, "etc/tuxbox")
+    copied_xml = 0
+    if os.path.isdir(tux) and os.path.isdir(os.path.join(dest, "etc/tuxbox")):
+        for n in ("satellites.xml", "cables.xml", "terrestrial.xml"):
+            if os.path.isfile(os.path.join(tux, n)):
+                shutil.copyfile(os.path.join(tux, n), os.path.join(dest, "etc/tuxbox", n))
+                copied_xml += 1
+    sync()
+    job.say("Chaînes copiées.", 100)
+    return "Chaînes, favoris et satellites copiés vers %s (%d fichiers)." % (dest_slot.title(), len(names) + copied_xml)
+
+
+def restore_settings(job, archive, dest_slot):
+    """Extract a 'reglages-*.tar.gz' into a (non running) slot."""
+    import tarfile
+    dest = _writable_slot_root(dest_slot)
+    try:
+        with tarfile.open(archive, "r:gz") as t:
+            members = t.getmembers()
+    except Exception:
+        raise MBError("Archive de réglages corrompue ou illisible.")
+    for m in members:
+        n = m.name[2:] if m.name.startswith("./") else m.name
+        if ".." in n.split("/") or n.startswith("/") or not n.startswith(SETTINGS_DIRS) or m.issym() or m.islnk():
+            raise MBError("Archive refusée : elle contient %s." % m.name)
+    job.say("Restauration des réglages…", 40)
+    rc, out = run(["tar", "-xzf", archive, "-C", dest], timeout=600)
+    if rc != 0:
+        raise MBError("Échec de la restauration : %s" % out.strip()[-160:])
+    sync()
+    job.say("Réglages restaurés.", 100)
+    return "Réglages restaurés dans %s." % dest_slot.title()
 
 
 # --------------------------------------------------------------------------- CLI (read-only)
