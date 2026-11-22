@@ -23,7 +23,7 @@ import threading
 import time
 import zipfile
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 LOG_FILE = "/tmp/wmultiboot.log"
 DATA_DIR = "WMultiBoot"                     # <device>/WMultiBoot/{downloads,backups,tmp}
 CHROOT_BASES = ("OnlineMultiBoot/images", "open-multiboot", "ImageBoot", "WMultiBoot/images")
@@ -161,7 +161,18 @@ def fs_usage(path):
         return 0, 0
 
 
-def dir_size_mb(path):
+def dir_size_mb(path, job=None):
+    if job is not None:                       # cancellable version (EXIT kills du at once)
+        try:
+            job.proc = subprocess.Popen(["du", "-smx", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
+            out = job.proc.communicate()[0].decode("utf-8", "ignore")
+        finally:
+            job.proc = None
+        job.check()
+        try:
+            return int(out.split()[0])
+        except Exception:
+            return None
     rc, out = run(["du", "-smx", path], timeout=600)
     if rc != 0:
         rc, out = run(["du", "-sm", path], timeout=600)
@@ -1686,7 +1697,7 @@ def backup_tree(job, slot, dest_mount, layout=None):
         if not root or not os.path.isdir(root):
             raise MBError("Slot illisible.")
         job.say("Calcul de la taille du slot…", 2)
-        used = dir_size_mb(root) or 0
+        used = dir_size_mb(root, job) or 0
         need = int(used * 0.6) + 100
         free, _ = fs_usage(dest_mount)
         if free < need:
@@ -1793,9 +1804,29 @@ def list_backups():
                 continue
             out.append({"path": p, "name": n, "size": size // MB, "mtime": mtime, "mount": st["mount"],
                         "date": time.strftime("%d/%m/%Y %H:%M", time.localtime(mtime)),
-                        "kind": "custom" if n.startswith(("reglages-", "sauvegarde-")) else "slot"})
+                        "kind": "custom" if n.startswith(("reglages-", "sauvegarde-")) else "slot",
+                        "image": backup_image_label(n)})
     out.sort(key=lambda b: -b["mtime"])
     return out
+
+
+def backup_image_label(name):
+    """'sauvegarde-OpenATV_8.0.1-2026…' / 'OpenATV_8.0.1-20261003-backup-…' -> 'OpenATV 8.0.1'."""
+    n = name[:-7] if name.endswith(".tar.gz") else name
+    for p in ("sauvegarde-", "reglages-"):
+        if n.startswith(p):
+            n = n[len(p):]
+    n = n.split("-backup-")[0]
+    n = re.split(r"-20\d{6}", n)[0]
+    return n.replace("_", " ").strip() or "Image inconnue"
+
+
+def backups_by_image():
+    """[(image label, [backups newest first])], most recent image first."""
+    groups = {}
+    for b in list_backups():
+        groups.setdefault(b["image"], []).append(b)
+    return sorted(groups.items(), key=lambda kv: -kv[1][0]["mtime"])
 
 
 def delete_backup(path):

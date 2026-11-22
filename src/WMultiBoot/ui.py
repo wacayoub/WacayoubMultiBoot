@@ -771,6 +771,11 @@ class WMBMain(Base):
         if s.kind in ("chroot", "omb") and not s.running and not s.empty:
             items.append(dict(icon="a_copy", title="Copier mes chaînes dans cette image", value="copy",
                               sub="Chaînes, favoris et satellites de l'image en cours"))
+        if s.info:
+            bks = [b for b in core.list_backups() if b["image"] == s.info["label"]]
+            if bks:
+                items.append(dict(icon="a_backups", title="Sauvegardes de cette image (%d)" % len(bks), value="backups",
+                                  sub="Dernière : %s  ·  voir, restaurer, supprimer" % bks[0]["date"]))
         if s.root and os.path.isdir(s.root):
             items.append(dict(icon="a_size", title="Calculer la taille", value="size", sub=s.where))
         if lay.can("delete") and s.deletable and not s.running:
@@ -786,7 +791,9 @@ class WMBMain(Base):
         s = self.current()
         {"boot": lambda: self.boot(False), "once": lambda: self.boot(True), "install": self.key_yellow,
          "backup": lambda: self.backup_slot(s, False), "settings": lambda: self.backup_choose(s),
-         "copy": lambda: self.copy_channels(s), "delete": self.key_red, "size": self.calc_size}[what]()
+         "copy": lambda: self.copy_channels(s), "delete": self.key_red, "size": self.calc_size,
+         "backups": lambda: self.image_backups(s.info["label"], [b for b in core.list_backups()
+                                                                  if b["image"] == s.info["label"]])}[what]()
 
     @safe
     def key_green(self):
@@ -916,13 +923,14 @@ class WMBMain(Base):
                               sub="De « %s » : chaînes, satellites, réglages, plugins, softcam, réseau, picons" % s.title()))
             items.append(dict(icon="a_backup", title="Sauvegarder l'image complète", value=("full", None),
                               sub="Tout le système de « %s », restaurable comme nouvelle image" % s.title()))
-        for b in core.list_backups()[:40]:
-            if b["kind"] == "slot" or "-backup-" in b["name"]:
-                icon, what = "a_backups", "image complète"
-            else:
-                icon, what = "a_settings", "sauvegarde choisie"
-            items.append(dict(icon=icon, title=b["name"].replace(".tar.gz", ""), value=("open", b),
-                              sub="%s  ·  %s  ·  %s  ·  %s" % (what, b["date"], human_mb(max(1, b["size"])), b["mount"])))
+        groups = core.backups_by_image()
+        mine = s.info["label"] if (s and s.info) else None
+        groups.sort(key=lambda g: 0 if g[0] == mine else 1)          # selected image first
+        for label, bks in groups:
+            total = sum(b["size"] for b in bks)
+            items.append(dict(icon="d_" + core.distro_key(label), title="Sauvegardes de %s" % label, value=("group", (label, bks)),
+                              sub="%d sauvegarde%s  ·  dernière : %s  ·  %s au total" % (
+                                  len(bks), "s" if len(bks) > 1 else "", bks[0]["date"], human_mb(max(1, total)))))
         if len(items) <= 2:
             items.append(dict(icon="a_help", title="Aucune sauvegarde pour le moment", value=("none", None),
                               sub="Les sauvegardes sont rangées dans <disque>/WMultiBoot/backups"))
@@ -937,6 +945,22 @@ class WMBMain(Base):
             self.backup_choose(self.current())
         elif what == "open":
             self.open_backup(b)
+        elif what == "group":
+            self.image_backups(*b)
+
+    @safe
+    def image_backups(self, label, bks):
+        items = []
+        for b in bks:
+            full = b["kind"] == "slot"
+            items.append(dict(icon="a_backups" if full else "a_settings", title=b["date"],
+                              value=("open", b), pill=None,
+                              sub="%s  ·  %s  ·  %s" % ("image complète" if full else "éléments choisis",
+                                                        human_mb(max(1, b["size"])), b["name"])))
+        if not items:
+            items.append(dict(icon="a_help", title="Aucune sauvegarde pour cette image", value=("none", None), sub=""))
+        self.mb_pick("Sauvegardes de %s" % label, items, self.backup_action,
+                     "%d sauvegarde%s  ·  OK : voir, restaurer ou supprimer" % (len(bks), "s" if len(bks) > 1 else ""))
 
     @safe
     def open_backup(self, b):
