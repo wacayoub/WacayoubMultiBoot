@@ -23,7 +23,7 @@ import threading
 import time
 import zipfile
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 LOG_FILE = "/tmp/wmultiboot.log"
 DATA_DIR = "WMultiBoot"                     # <device>/WMultiBoot/{downloads,backups,tmp}
 CHROOT_BASES = ("OnlineMultiBoot/images", "open-multiboot", "ImageBoot", "WMultiBoot/images")
@@ -1140,7 +1140,11 @@ EXTRA_FEEDS = (("OpenPLi", "https://downloads.openpli.org/json/%s"),
                ("OpenBH", "https://images.openbh.net/json/%s"),
                ("OpenSPA", "https://openspa.webhop.info/online/json.php?box=%s"),
                ("EGAMI", "https://image.egami-image.com/json/%s"),
-               ("teamBlue", "https://images.teamblue.tech/json/%s"))
+               ("teamBlue", "https://images.teamblue.tech/json/%s"),
+               ("PurE2", "https://www.pur-e2.club/OU/images/json/%s"),
+               ("OpenDroid", "https://opendroid.org/json.php?box=%s"),
+               ("OpenVision", "https://images.openvision.dedyn.io/json/%s"),
+               ("OpenHDF", "https://flash.hdfreaks.cc/openhdf/json/%s"))
 
 
 def _fetch(url, dest):
@@ -1204,16 +1208,30 @@ def fetch_catalog(job, machine):
                     sources.append((re.sub(r"[^\w .+-]", "", name)[:30] or "Image", url))
         except Exception as e:
             log("distros.json: %s" % e)
-    out = []
-    for n, (distro, url) in enumerate(sources):
-        job.check()
-        job.say("Lecture du catalogue %s…" % distro, 10 + 85 * n // max(1, len(sources)))
+    results = [None] * len(sources)
+
+    def worker(n, distro, url):
         dest = os.path.join(CATALOG_DIR, "%d.json" % n)
-        if _fetch(url, dest):
-            items = parse_catalog(read_file(dest), distro)
-            if items:
-                out.append((distro, items))
+        try:
+            if _fetch(url, dest):
+                results[n] = parse_catalog(read_file(dest), distro)
+        except Exception as e:
+            log("catalog %s: %s" % (distro, e))
         remove_quiet(dest)
+    threads = []
+    for n, (distro, url) in enumerate(sources):
+        t = threading.Thread(target=worker, args=(n, distro, url))
+        t.daemon = True
+        t.start()
+        threads.append(t)
+    job.say("Lecture de %d catalogues…" % len(sources), 15)
+    deadline = time.time() + 70
+    for t in threads:
+        while t.is_alive() and time.time() < deadline:
+            job.check()
+            t.join(0.3)
+            job.set_progress(15 + 80 * sum(1 for x in threads if not x.is_alive()) // len(threads))
+    out = [(sources[n][0], items) for n, items in enumerate(results) if items]
     if not out:
         raise MBError("Aucune image en ligne trouvée pour %s (pas de connexion Internet ?)." % machine)
     total = sum(len(i) for _, i in out)

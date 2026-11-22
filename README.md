@@ -1,11 +1,13 @@
 # Wacayoub MultiBoot
 
 Gestionnaire multiboot pour Enigma2, inspiré du « Multiboot Manager » d'Octagon (fonctions seulement, code écrit de zéro).
-Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.1.0_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
+Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.1.1_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
 
 Ouverture : Menu Plugins, menu Extensions, ou Menu > Système.
 
-## Nouveautés 1.1.0
+## Nouveautés 1.1.x
+
+- 1.1.1 : PurE2, OpenDroid, OpenVision et OpenHDF dans les images en ligne ; catalogues lus en parallèle (2-3 s).
 
 - Interface moderne : logo de chaque image (tuiles OpenATV, OpenPLi, OpenViX, OpenBH, OpenSPA, EGAMI…), icônes Lucide,
   pastilles d'état (EN COURS, PROCHAIN DÉMARRAGE, UNE FOIS, VIDE), menus en plein écran avec icônes.
@@ -23,7 +25,7 @@ Ouverture : Menu Plugins, menu Extensions, ou Menu > Système.
 |---|---|
 | OK | Actions du slot : démarrer, démarrer **une seule fois** (retour automatique sur l'image d'avant), installer, sauvegarder, taille, supprimer |
 | Vert | Démarrer sur le slot choisi (puis propose de redémarrer) |
-| Jaune | Installer une image : **Images en ligne** (OpenATV, OpenPLi, OpenViX, OpenBH, OpenSPA, EGAMI, teamBlue, filtrées pour le modèle détecté), une URL, ou un zip / une sauvegarde `.tar.gz` sur les disques |
+| Jaune | Installer une image : **Images en ligne** (OpenATV, OpenPLi, OpenViX, OpenBH, OpenSPA, PurE2, OpenDroid, OpenVision, OpenHDF, EGAMI, teamBlue, filtrées pour le modèle détecté), une URL, ou un zip / une sauvegarde `.tar.gz` sur les disques |
 | Bleu | Sauvegardes : complète ou réglages seuls, liste, restaurer, supprimer (`<disque>/WMultiBoot/backups`) |
 | Rouge | Supprimer un slot |
 | MENU | Actualiser, espace disque, journal, aide |

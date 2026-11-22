@@ -524,8 +524,13 @@ class WMBMain(Base):
         ti = pix("t_" + kind_icon(s))
         if ti:
             r.append(PixEntry(pos=(S(98), S(58)), size=(S(22), S(22)), png=ti))
-        num = "Flash" if s.kind == "flash" else ("Slot %s" % s.number)
-        sub = "  ·  ".join([x for x in (num, fmt_date((s.info or {}).get("date", "")), s.where) if x])
+        if s.kind == "flash":
+            num, place = "Flash interne", ""
+        else:
+            num = "Slot %s" % s.number
+            parts = (s.where or "").split("/")
+            place = "/".join(parts[:3]) if (s.where or "").startswith("/media/") else (s.where or "")
+        sub = "  ·  ".join([x for x in (num, fmt_date((s.info or {}).get("date", "")), place) if x])
         r.append(MultiContentEntryText(pos=(S(128), S(52)), size=(w - S(140) - pw - S(30), S(34)), font=1,
                                        flags=RT_HALIGN_LEFT | RT_VALIGN_CENTER, text=sub,
                                        color=C_MUTED, color_sel=0xdbeafe))
@@ -876,7 +881,7 @@ class WMBMain(Base):
     @safe
     def pick_source(self):
         items = [dict(icon="a_online", title="Images en ligne", value=("online", None),
-                      sub="OpenATV, OpenPLi, OpenViX, OpenBH, OpenSPA… pour %s" % self.mbl.box["machine"]),
+                      sub="OpenATV, OpenPLi, OpenViX, PurE2, OpenBH, OpenSPA… pour %s" % self.mbl.box["machine"]),
                  dict(icon="a_url", title="Adresse internet (URL)", value=("url", None),
                       sub="Lien direct vers un fichier .zip")]
         for label, path, size in core.find_local_images()[:30]:
