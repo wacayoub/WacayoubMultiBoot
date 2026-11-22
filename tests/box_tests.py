@@ -468,18 +468,19 @@ def t_backups_settings_channels():
     expect_error(lambda: core.copy_channels(FakeJob("c"), lay.running_slot()), "en cours")
     # settings backup of the test slot, then restore into it
     core.backup_settings(FakeJob("b"), slot, "/media/wmbtest", lay)
-    bk = [b for b in core.list_backups() if b["mount"] == "/media/wmbtest" and b["kind"] == "settings"]
+    bk = [b for b in core.list_backups() if b["mount"] == "/media/wmbtest" and b["kind"] == "custom"]
     assert len(bk) == 1, bk
     os.remove(job.new_root + "/etc/enigma2/bouquets.tv")
     core.restore_settings(FakeJob("r"), bk[0]["path"], slot)
     assert os.path.isfile(job.new_root + "/etc/enigma2/bouquets.tv")
-    expect_error(lambda: core.restore_settings(FakeJob("r"), bk[0]["path"], lay.running_slot()), "en cours")
+    # (restore into the running image restarts the GUI: never in automatic tests)
     # malicious settings archive (path traversal) is refused
     evil = "/media/wmbtest/WMultiBoot/backups/reglages-evil.tar.gz"
     with tarfile.open(evil, "w:gz") as t:
         ti = tarfile.TarInfo("./etc/enigma2/../../../etc/passwd"); ti.size = 1
         t.addfile(ti, io.BytesIO(b"x"))
-    expect_error(lambda: core.restore_settings(FakeJob("r"), evil, slot), "refusée")
+    expect_error(lambda: core.restore_settings(FakeJob("r"), evil, slot), "ne contient pas")  # traversal skipped
+    assert not os.path.exists("/media/wmbtest/etc/passwd")
     # delete backups: only real backup files
     expect_error(lambda: core.delete_backup("/etc/passwd"), "pas une sauvegarde")
     core.delete_backup(evil)
@@ -488,6 +489,62 @@ def t_backups_settings_channels():
     caps = dict((st["mount"], n) for st, n in core.install_capacity())
     assert "/media/wmbtest" in caps and caps["/media/wmbtest"] >= 0
     assert core.distro_key("OpenPLi") == "openpli" and core.distro_key("??") == "unknown"
+    lay.delete(FakeJob("d"), slot)
+
+
+def t_custom_backup_restore():
+    z = make_zip("/media/wmbtest/cust.zip", rootfs=make_rootfs())
+    lay = chroot_layout()
+    job = FakeJob("i")
+    lay.install(job, z, target=target("/media/wmbtest"))
+    lay = chroot_layout()
+    slot = [s for s in lay.slots if s.root == job.new_root][0]
+    run = lay.running_slot()
+    # classification rules
+    assert core.classify("./etc/enigma2/lamedb") == "channels"
+    assert core.classify("etc/enigma2/settings") == "settings"
+    assert core.classify("etc/tuxbox/satellites.xml") == "satellites"
+    assert core.classify("etc/tuxbox/config/oscam.server") == "softcam"
+    assert core.classify("etc/enigma2/epg.dat") is None
+    assert core.classify("etc/enigma2/x-backups/a") is None
+    for bad in ("etc/init.d/x", "etc/rc.local", "etc/passwd", "var/spool/cron/crontabs/root", "usr/bin/x", "../etc/x"):
+        assert core.classify(bad) is None, bad
+    summ = dict((k, (size, avail)) for k, t, d, w, size, avail in core.backup_summary(run, lay))
+    assert summ["channels"][1] and summ["settings"][1], summ
+    # backup only channels + satellites of the running image
+    res = core.backup_custom(FakeJob("b"), run, ["channels", "satellites"], "/media/wmbtest", lay)
+    bk = [b for b in core.list_backups() if b["mount"] == "/media/wmbtest" and b["kind"] == "custom"][0]
+    info = core.read_backup(bk["path"])
+    assert set(info["categories"]) == {"channels", "satellites"}, info
+    assert info["manifest"].get("categories") == "channels,satellites"
+    # restore only channels into the test slot
+    for f in ("etc/enigma2/bouquets.tv", "etc/tuxbox/satellites.xml"):
+        core.remove_quiet(os.path.join(slot.root, f))
+    os.makedirs(os.path.join(slot.root, "etc/tuxbox"), exist_ok=True)
+    msg = core.restore_custom(FakeJob("r"), bk["path"], ["channels"], slot, lay)
+    assert os.path.isfile(os.path.join(slot.root, "etc/enigma2/bouquets.tv")), msg
+    assert not os.path.exists(os.path.join(slot.root, "etc/tuxbox/satellites.xml")), "satellites restored but not chosen"
+    # an archive with forbidden files: they are skipped, the rest is restored
+    evil = "/media/wmbtest/WMultiBoot/backups/sauvegarde-evil.tar.gz"
+    with tarfile.open(evil, "w:gz") as t:
+        for name, data in (("./etc/init.d/evil", b"x"), ("./etc/enigma2/lamedb", b"ok"),
+                           ("./etc/enigma2/../../etc/passwd", b"x")):
+            ti = tarfile.TarInfo(name); ti.size = len(data); t.addfile(ti, io.BytesIO(data))
+        ti = tarfile.TarInfo("./etc/enigma2/userbouquet.link.tv"); ti.type = tarfile.SYMTYPE; ti.linkname = "/etc/passwd"
+        t.addfile(ti)
+    core.restore_custom(FakeJob("r"), evil, ["channels"], slot, lay)
+    assert core.read_file(os.path.join(slot.root, "etc/enigma2/lamedb")) == "ok"
+    assert not os.path.exists(os.path.join(slot.root, "etc/init.d/evil"))
+    assert not os.path.lexists(os.path.join(slot.root, "etc/enigma2/userbouquet.link.tv"))
+    expect_error(lambda: core.restore_custom(FakeJob("r"), evil, [], slot, lay), "Cochez")
+    expect_error(lambda: core.backup_custom(FakeJob("b"), run, [], "/media/wmbtest", lay), "Cochez")
+    # instant cancel: nothing kept
+    j = FakeJob("c"); j.cancelled = True
+    expect_error(lambda: core.backup_custom(j, run, ["channels", "plugins_conf"], "/media/wmbtest", lay), "annul")
+    assert not leftovers("/media/wmbtest")
+    for b in core.list_backups():
+        if b["mount"] == "/media/wmbtest":
+            core.delete_backup(b["path"])
     lay.delete(FakeJob("d"), slot)
 
 
@@ -500,7 +557,7 @@ TESTS = [t_detect_real, t_running_guards, t_install_backup_restore_delete, t_loc
          t_corrupt_zip, t_truncated_zip, t_crc_damaged_zip, t_corrupt_rootfs_in_zip, t_zip_without_rootfs,
          t_wrong_box_zip, t_full_disk_precheck, t_full_disk_during_extract, t_backup_full_disk,
          t_cancel_install, t_bad_urls, t_unknown_box, t_no_multiboot_no_slots, t_startup_layout,
-         t_omb_classic_layout, t_catalog_parse, t_backups_settings_channels, t_no_temp_mounts_left]
+         t_omb_classic_layout, t_catalog_parse, t_backups_settings_channels, t_custom_backup_restore, t_no_temp_mounts_left]
 
 if __name__ == "__main__":
     flash_conf_before = None

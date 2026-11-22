@@ -23,7 +23,7 @@ import threading
 import time
 import zipfile
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 LOG_FILE = "/tmp/wmultiboot.log"
 DATA_DIR = "WMultiBoot"                     # <device>/WMultiBoot/{downloads,backups,tmp}
 CHROOT_BASES = ("OnlineMultiBoot/images", "open-multiboot", "ImageBoot", "WMultiBoot/images")
@@ -1793,7 +1793,7 @@ def list_backups():
                 continue
             out.append({"path": p, "name": n, "size": size // MB, "mtime": mtime, "mount": st["mount"],
                         "date": time.strftime("%d/%m/%Y %H:%M", time.localtime(mtime)),
-                        "kind": "settings" if n.startswith("reglages-") else "slot"})
+                        "kind": "custom" if n.startswith(("reglages-", "sauvegarde-")) else "slot"})
     out.sort(key=lambda b: -b["mtime"])
     return out
 
@@ -1824,34 +1824,6 @@ def _slot_root_ctx(slot, layout, rw=False):
     if slot.kind == "flash" and layout and layout.probe.device:
         return TempMount(layout.probe.device, rw=rw)
     raise MBError("Contenu du slot inaccessible.")
-
-
-def backup_settings(job, slot, dest_mount, layout=None):
-    """Small archive with only the settings, channels and bouquets of a slot."""
-    if not dest_mount:
-        raise MBError("Aucun disque de sauvegarde disponible.")
-    free, _ = fs_usage(dest_mount)
-    if free < 100:
-        raise MBError("Espace insuffisant sur %s (%s libres)." % (dest_mount, human_mb(free)))
-    with _slot_root_ctx(slot, layout) as root:
-        dirs = [d for d in SETTINGS_DIRS if os.path.isdir(os.path.join(root, d))]
-        if not dirs:
-            raise MBError("Aucun réglage trouvé dans ce slot.")
-        d = work_dir(dest_mount, "backups")
-        label = sanitize((slot.info or {}).get("label", "slot"))
-        final = os.path.join(d, "reglages-%s-%s.tar.gz" % (label, time.strftime("%Y%m%d-%H%M")))
-        part = final + ".partial"
-        job.say("Sauvegarde des réglages et des chaînes…", 20)
-        rc, out = run(["tar", "-czf", part, "--exclude=./etc/enigma2/epg.dat",
-                       "--exclude=*backup*", "--exclude=*.bak"] + ["./" + x for x in dirs], timeout=600, cwd=root)
-        if rc not in (0, 1) or not os.path.isfile(part):
-            remove_quiet(part)
-            raise MBError("Échec de la sauvegarde des réglages : %s" % out.strip()[-160:])
-        os.rename(part, final)
-        sync()
-    size = os.path.getsize(final) // MB
-    job.say("Réglages sauvegardés (%s)." % human_mb(max(1, size)), 100)
-    return "Réglages sauvegardés :\n%s" % final
 
 
 def _writable_slot_root(slot):
@@ -1886,26 +1858,387 @@ def copy_channels(job, dest_slot, src_root="/"):
     return "Chaînes, favoris et satellites copiés vers %s (%d fichiers)." % (dest_slot.title(), len(names) + copied_xml)
 
 
-def restore_settings(job, archive, dest_slot):
-    """Extract a 'reglages-*.tar.gz' into a (non running) slot."""
-    import tarfile
-    dest = _writable_slot_root(dest_slot)
+# ---- categories of a custom backup / restore
+# (key, title, description, warning)
+CATEGORIES = (
+    ("channels", "Chaînes et favoris", "lamedb, bouquets, favoris, listes noires", ""),
+    ("satellites", "Satellites et câble", "satellites.xml, cables.xml, terrestrial.xml", ""),
+    ("settings", "Réglages Enigma2", "fichier settings, minuteries, autotimer", ""),
+    ("plugins_conf", "Réglages des plugins", "configs dans /etc/enigma2 (EPG, IPTV, skins…)", ""),
+    ("plugins", "Liste des plugins installés", "pour les réinstaller depuis le feed", ""),
+    ("softcam", "Softcam", "configs OSCam/CCcam et clés", "contient vos identifiants"),
+    ("network", "Réseau", "interfaces, Wi-Fi, DNS, nom du récepteur", "contient le mot de passe Wi-Fi"),
+    ("picons", "Picons", "logos des chaînes du dossier /picon", ""),
+)
+CAT_TITLES = dict((c[0], c[1]) for c in CATEGORIES)
+E2 = "etc/enigma2/"
+SETTINGS_FILES = ("settings", "timers.xml", "autotimer.xml", "profile")
+NETWORK_FILES = ("etc/network/interfaces", "etc/wpa_supplicant.conf", "etc/wpa_supplicant.wlan0.conf",
+                 "etc/wpa_supplicant.wlan1.conf", "etc/resolv.conf", "etc/hostname", "etc/hosts")
+SOFTCAM_PATHS = ("etc/tuxbox/config", "etc/CCcam.cfg", "usr/keys", "etc/oscam", "var/keys")
+PICON_DIRS = ("picon", "usr/share/enigma2/picon")
+MANIFEST = "wmb-manifest.txt"
+PLUGIN_LIST = "wmb-plugins.txt"
+# never restored, whatever the archive says (boot scripts were the malware vector)
+FORBIDDEN = re.compile(r"^(etc/(init\.d|rc\d?\.d|rcS\.d|rc\.local|passwd|shadow|group|dropbear|ssh|cron|profile)"
+                       r"|var/spool/cron|home/|root/|sbin/|bin/|usr/(bin|sbin|lib)/|lib/)")
+
+
+def _skip_name(n):
+    low = n.lower()
+    return "backup" in low or low.endswith((".bak", ".tar.gz", ".tgz", ".zip")) or n in ("epg.dat", "epg.db")
+
+
+def classify(rel):
+    """Category of a path relative to the image root, or None (never backed up/restored)."""
+    rel = rel[2:] if rel.startswith("./") else rel
+    rel = rel.rstrip("/")
+    if not rel or ".." in rel.split("/") or rel.startswith("/") or FORBIDDEN.match(rel):
+        return None
+    if rel in (MANIFEST, PLUGIN_LIST):
+        return "meta"
+    if rel.startswith(E2):
+        name = rel[len(E2):]
+        top = name.split("/")[0]
+        if "/" not in name and CHANNEL_FILES.match(name):
+            return "channels"
+        if "/" not in name and name in SETTINGS_FILES:
+            return "settings"
+        if any(_skip_name(p) for p in name.split("/")):
+            return None
+        return "plugins_conf" if top else None
+    if rel.startswith("etc/tuxbox/") and rel.count("/") == 2 and rel.endswith(".xml"):
+        return "satellites"
+    for p in SOFTCAM_PATHS:
+        if rel == p or rel.startswith(p + "/"):
+            return "softcam"
+    if rel.startswith("etc/oscam"):
+        return "softcam"
+    if rel in NETWORK_FILES:
+        return "network"
+    for p in PICON_DIRS:
+        if rel == p or rel.startswith(p + "/"):
+            return "picons"
+    return None
+
+
+def category_paths(root, key):
+    """Existing paths (relative to root) for one category."""
+    out = []
+    e2 = os.path.join(root, E2)
+    if key in ("channels", "settings", "plugins_conf"):
+        try:
+            names = sorted(os.listdir(e2))
+        except Exception:
+            names = []
+        for n in names:
+            rel = E2 + n
+            if classify(rel) == key and os.path.exists(os.path.join(root, rel)):
+                out.append(rel)
+    elif key == "satellites":
+        try:
+            out = [ "etc/tuxbox/" + n for n in sorted(os.listdir(os.path.join(root, "etc/tuxbox"))) if n.endswith(".xml")]
+        except Exception:
+            pass
+    elif key == "softcam":
+        out = [p for p in SOFTCAM_PATHS if os.path.exists(os.path.join(root, p))]
+        try:
+            out += ["etc/" + n for n in os.listdir(os.path.join(root, "etc")) if n.startswith("oscam") and n != "oscam"]
+        except Exception:
+            pass
+    elif key == "network":
+        out = [p for p in NETWORK_FILES if os.path.isfile(os.path.join(root, p))]
+    elif key == "picons":
+        out = [p for p in PICON_DIRS if os.path.isdir(os.path.join(root, p)) and not os.path.islink(os.path.join(root, p))]
+    return out
+
+
+def _tree_size(path):
+    total = 0
+    if os.path.isfile(path) or os.path.islink(path):
+        try:
+            return os.lstat(path).st_size
+        except Exception:
+            return 0
+    for dp, dn, fn in os.walk(path):
+        dn[:] = [d for d in dn if not _skip_name(d)]
+        for f in fn:
+            if not _skip_name(f):
+                try:
+                    total += os.lstat(os.path.join(dp, f)).st_size
+                except Exception:
+                    pass
+    return total
+
+
+def installed_plugins(root):
+    """enigma2 plugin/skin/softcam package names installed in an image (from opkg status)."""
+    names = []
+    for st in ("var/lib/opkg/status", "usr/lib/opkg/status"):
+        text = read_file(os.path.join(root, st))
+        if text:
+            for block in text.split("\n\n"):
+                m = re.search(r"^Package:\s*(\S+)", block, re.M)
+                if m and re.search(r"^Status:.*\binstalled\b", block, re.M):
+                    n = m.group(1)
+                    if n.startswith(("enigma2-plugin-extensions-", "enigma2-plugin-systemplugins-",
+                                     "enigma2-plugin-skins-", "enigma2-plugin-softcams-", "enigma2-plugin-picons-")):
+                        names.append(n)
+            break
+    return sorted(set(names))
+
+
+def backup_summary(slot, layout=None):
+    """[(key, title, description, warning, size_bytes, available)] for the backup checklist."""
+    out = []
+    with _slot_root_ctx(slot, layout) as root:
+        for key, title, desc, warn in CATEGORIES:
+            if key == "plugins":
+                n = len(installed_plugins(root))
+                out.append((key, title, "%d plugins : %s" % (n, desc), warn, 0, n > 0))
+                continue
+            paths = category_paths(root, key)
+            size = sum(_tree_size(os.path.join(root, p)) for p in paths)
+            out.append((key, title, desc, warn, size, bool(paths)))
+    return out
+
+
+def human_bytes(b):
+    if b < 1024 * 1024:
+        return "%d Ko" % max(1, b // 1024) if b else "0 Ko"
+    return human_mb(b // MB)
+
+
+def _run_tar(job, args, cwd, out_path, est_bytes, p0, p1):
+    """Run tar with progress (size of the archive being written) and instant cancel."""
+    job.proc = subprocess.Popen(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, close_fds=True)
     try:
-        with tarfile.open(archive, "r:gz") as t:
-            members = t.getmembers()
+        while job.proc.poll() is None:
+            if job.cancelled:
+                job.proc.kill()
+                break
+            try:
+                job.set_progress(p0 + (p1 - p0) * min(1.0, os.path.getsize(out_path) / float(max(1, est_bytes))))
+            except Exception:
+                pass
+            time.sleep(0.3)
+        out = job.proc.stdout.read().decode("utf-8", "ignore")
+        rc = job.proc.wait()
+    finally:
+        job.proc = None
+    return rc, out
+
+
+def backup_custom(job, slot, keys, dest_mount, layout=None):
+    """Archive exactly the chosen categories of a slot into <dest>/WMultiBoot/backups."""
+    keys = [k for k in keys if k in CAT_TITLES]
+    if not keys:
+        raise MBError("Cochez au moins un élément à sauvegarder.")
+    if not dest_mount:
+        raise MBError("Aucun disque de sauvegarde disponible.")
+    d = work_dir(dest_mount, "backups")
+    tmpd = work_dir(dest_mount, "tmp")
+    label = sanitize((slot.info or {}).get("label", "image"))
+    final = os.path.join(d, "sauvegarde-%s-%s.tar.gz" % (label, time.strftime("%Y%m%d-%H%M%S")))
+    part = final + ".partial"
+    meta_dir = os.path.join(tmpd, "meta-%d" % os.getpid())
+    remove_quiet(meta_dir)
+    os.makedirs(meta_dir)
+    try:
+        with _slot_root_ctx(slot, layout) as root:
+            job.say("Préparation : %s" % ", ".join(CAT_TITLES[k] for k in keys), 3)
+            paths, size = [], 0
+            for k in keys:
+                if k == "plugins":
+                    continue
+                for p in category_paths(root, k):
+                    paths.append(p)
+                    size += _tree_size(os.path.join(root, p))
+                job.check()
+            plugins = installed_plugins(root) if "plugins" in keys else []
+            if not paths and not plugins:
+                raise MBError("Rien à sauvegarder : ces éléments n'existent pas dans cette image.")
+            need = size // MB + 50
+            free, _ = fs_usage(dest_mount)
+            if free < need:
+                raise MBError("Espace insuffisant sur %s : %s libres, %s nécessaires." % (dest_mount, human_mb(free), human_mb(need)))
+            manifest = "image=%s\nbox=%s\ndate=%s\ncategories=%s\nsource=%s\n" % (
+                (slot.info or {}).get("label", "?"), (slot.info or {}).get("box", ""), time.strftime("%Y-%m-%d %H:%M"),
+                ",".join(keys), slot.where or slot.kind)
+            write_file(os.path.join(meta_dir, MANIFEST), manifest)
+            members = [MANIFEST]
+            if plugins:
+                write_file(os.path.join(meta_dir, PLUGIN_LIST), "\n".join(plugins) + "\n")
+                members.append(PLUGIN_LIST)
+            # manifest first (read back quickly), then the files of the image
+            args = ["tar", "-czf", part, "-C", meta_dir] + members
+            if paths:
+                args += ["-C", root, "--exclude=*backup*", "--exclude=*.bak", "--exclude=epg.dat",
+                         "--exclude=*.tar.gz"] + ["./" + p for p in paths]
+            job.say("Sauvegarde de %s…" % human_bytes(size), 8)
+            rc, out = _run_tar(job, args, None, part, size * 0.5 + 1, 8, 97)
+            if job.cancelled:
+                remove_quiet(part)
+                raise Cancelled("Sauvegarde annulée : rien n'a été gardé.")
+            if rc not in (0, 1) or not os.path.isfile(part):
+                remove_quiet(part)
+                if "no space" in out.lower():
+                    raise MBError("Disque plein pendant la sauvegarde.")
+                raise MBError("Échec de la sauvegarde (tar %s) : %s" % (rc, out.strip()[-160:]))
+            os.rename(part, final)
+            sync()
+    finally:
+        remove_quiet(meta_dir)
+    job.say("Sauvegarde terminée.", 100)
+    return "Sauvegarde créée (%s) :\n%s\n\nContenu : %s" % (
+        human_bytes(os.path.getsize(final)), final, ", ".join(CAT_TITLES[k] for k in keys))
+
+
+def backup_settings(job, slot, dest_mount, layout=None):
+    """Compatibility: channels + satellites + Enigma2 settings + plugin settings."""
+    return backup_custom(job, slot, ["channels", "satellites", "settings", "plugins_conf"], dest_mount, layout)
+
+
+def read_backup(path):
+    """{'kind': 'slot'|'custom', 'categories': {key: n_files}, 'manifest': {...}} without full extraction."""
+    import tarfile
+    name = os.path.basename(path)
+    if "-backup-" in name and not name.startswith(("sauvegarde-", "reglages-")):
+        return {"kind": "slot", "categories": {}, "manifest": {}}
+    cats, manifest = {}, {}
+    try:
+        with tarfile.open(path, "r:gz") as t:
+            for m in t:
+                c = classify(m.name)
+                if c == "meta" and m.isfile() and m.name.lstrip("./") == MANIFEST:
+                    manifest = parse_kv(t.extractfile(m).read().decode("utf-8", "ignore"))
+                elif c == "meta" and m.name.lstrip("./") == PLUGIN_LIST:
+                    cats["plugins"] = len(t.extractfile(m).read().decode("utf-8", "ignore").split())
+                elif c and c != "meta" and not m.isdir():
+                    cats[c] = cats.get(c, 0) + 1
     except Exception:
-        raise MBError("Archive de réglages corrompue ou illisible.")
-    for m in members:
-        n = m.name[2:] if m.name.startswith("./") else m.name
-        if ".." in n.split("/") or n.startswith("/") or not n.startswith(SETTINGS_DIRS) or m.issym() or m.islnk():
-            raise MBError("Archive refusée : elle contient %s." % m.name)
-    job.say("Restauration des réglages…", 40)
-    rc, out = run(["tar", "-xzf", archive, "-C", dest], timeout=600)
-    if rc != 0:
-        raise MBError("Échec de la restauration : %s" % out.strip()[-160:])
-    sync()
-    job.say("Réglages restaurés.", 100)
-    return "Réglages restaurés dans %s." % dest_slot.title()
+        raise MBError("Sauvegarde corrompue ou illisible : %s" % name)
+    return {"kind": "custom", "categories": cats, "manifest": manifest}
+
+
+def _safe_member(m):
+    if m.issym() or m.islnk():
+        ln = m.linkname or ""
+        if ln.startswith("/") or ".." in ln.split("/"):
+            return False
+    if m.isdev() or m.isfifo():
+        return False
+    return True
+
+
+def restore_custom(job, archive, keys, slot, layout=None):
+    """Restore the chosen categories of a backup into a slot.
+    Another image: written directly. The running image: files are staged, then the GUI
+    is restarted by a detached script that copies them (Enigma2 must be stopped)."""
+    import tarfile
+    keys = [k for k in keys if k in CAT_TITLES]
+    if not keys:
+        raise MBError("Cochez au moins un élément à restaurer.")
+    running = slot.running or (slot.root and is_running_root(slot.root))
+    if not running:
+        dest = _writable_slot_root(slot)
+    else:
+        dest = "/"
+    st = storage_for(archive)
+    tmpd = work_dir(st["mount"], "tmp") if st else "/tmp"
+    stage = os.path.join(tmpd, "restore-%d" % int(time.time())) if running else None
+    out_root = stage or dest
+    if stage:
+        os.makedirs(stage)
+    done, skipped, plugins = 0, 0, []
+    try:
+        job.say("Lecture de la sauvegarde…", 5)
+        with tarfile.open(archive, "r:gz") as t:
+            members = []
+            for m in t:
+                job.check()
+                c = classify(m.name)
+                if c == "meta":
+                    if m.name.lstrip("./") == PLUGIN_LIST and "plugins" in keys:
+                        plugins = t.extractfile(m).read().decode("utf-8", "ignore").split()
+                    continue
+                if c in keys and _safe_member(m):
+                    members.append(m)
+                elif c is None or not _safe_member(m):
+                    skipped += 1
+        if not members and not plugins:
+            raise MBError("Cette sauvegarde ne contient pas les éléments choisis.")
+        job.say("Restauration de %d fichiers…" % len(members), 15)
+        with tarfile.open(archive, "r:gz") as t:
+            wanted = set(m.name for m in members)
+            total = max(1, len(members))
+            for m in t:
+                if m.name not in wanted:
+                    continue
+                job.check()
+                try:
+                    try:
+                        t.extract(m, out_root, filter="tar")       # Python 3.12+: refuses unsafe paths
+                    except TypeError:
+                        t.extract(m, out_root)
+                    done += 1
+                except Exception as e:
+                    log("restore skip %s: %s" % (m.name, e))
+                    skipped += 1
+                job.set_progress(15 + 60 * done / float(total))
+        sync()
+        msg = ["%d fichiers restaurés dans %s." % (done, "l'image en cours" if running else slot.title())]
+        if skipped:
+            msg.append("%d fichiers ignorés (non autorisés ou pas cochés)." % skipped)
+        if plugins:
+            if running:
+                job.cancellable = True
+                msg.append(reinstall_plugins(job, plugins))
+            else:
+                msg.append("Plugins : démarrez sur cette image puis restaurez « Liste des plugins » pour les réinstaller.")
+        if running and done:
+            job.cancellable = False
+            script = os.path.join(tmpd, "wmb-apply.sh")
+            write_file(script, "#!/bin/sh\nsleep 2\ninit 4\nsleep 4\ncp -a '%s'/. /\nsync\nrm -rf '%s'\ninit 3\nrm -f '%s'\n"
+                       % (stage, stage, script))
+            os.chmod(script, 0o755)
+            subprocess.Popen(["setsid", "sh", script] if which("setsid") else ["sh", script],
+                             stdout=open("/dev/null", "w"), stderr=subprocess.STDOUT, close_fds=True)
+            stage = None                    # the script owns it now
+            msg.append("L'interface va redémarrer dans quelques secondes pour appliquer les réglages.")
+            if "network" in keys:
+                msg.append("Le réseau sera appliqué au prochain redémarrage de la box.")
+        job.say("Terminé.", 100)
+        return "\n".join(msg)
+    finally:
+        if stage:
+            remove_quiet(stage)
+
+
+def reinstall_plugins(job, names):
+    """opkg install of the listed plugins missing from the running image."""
+    have = set(installed_plugins("/"))
+    missing = [n for n in names if n not in have and re.match(r"^[a-z0-9.+-]+$", n)]
+    if not missing:
+        return "Plugins : tous déjà installés."
+    job.say("Mise à jour de la liste des paquets…", 78)
+    run(["opkg", "update"], timeout=300)
+    ok, fail = [], []
+    for i, n in enumerate(missing):
+        job.check()
+        job.say("Installation de %s (%d/%d)…" % (n, i + 1, len(missing)), 80 + 18 * i // len(missing))
+        rc, out = run(["opkg", "install", n], timeout=600)
+        (ok if rc == 0 else fail).append(n)
+    text = "Plugins réinstallés : %d." % len(ok)
+    if fail:
+        text += " Introuvables dans le feed : %s" % ", ".join(fail[:8]) + ("…" if len(fail) > 8 else "")
+    return text
+
+
+def restore_settings(job, archive, dest_slot):
+    """Compatibility: restore every category present."""
+    info = read_backup(archive)
+    return restore_custom(job, archive, list(info["categories"].keys()) or ["channels"], dest_slot)
 
 
 # --------------------------------------------------------------------------- CLI (read-only)

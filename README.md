@@ -1,9 +1,21 @@
 # Wacayoub MultiBoot
 
 Gestionnaire multiboot pour Enigma2, inspiré du « Multiboot Manager » d'Octagon (fonctions seulement, code écrit de zéro).
-Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.1.1_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
+Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.2.0_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
 
 Ouverture : Menu Plugins, menu Extensions, ou Menu > Système.
+
+## Nouveautés 1.2.0
+
+- Sauvegarde « choisir quoi » : cases à cocher avec la taille de chaque élément — chaînes et favoris, satellites,
+  réglages Enigma2, réglages des plugins, liste des plugins installés, softcam (identifiants), réseau (mot de passe
+  Wi-Fi), picons. Chaque sauvegarde contient un manifeste (image, date, contenu).
+- Restauration « choisir quoi et où » : le plugin affiche le contenu de la sauvegarde, vous cochez les éléments,
+  puis vous choisissez l'image : une autre image (écriture directe) ou l'image en cours (sauvegarde de sécurité
+  automatique, puis redémarrage de l'interface). La liste des plugins est réinstallée depuis le feed.
+- Jamais restaurés, même s'ils sont dans l'archive : scripts de démarrage (/etc/init.d, rc*, rc.local), crontab,
+  passwd/shadow, clés SSH/dropbear, programmes (/usr/bin, /lib…), liens vers l'extérieur, chemins avec « .. ».
+- EXIT annule tout de suite (sans question) : le travail en cours est arrêté et les fichiers partiels supprimés.
 
 ## Nouveautés 1.1.x
 

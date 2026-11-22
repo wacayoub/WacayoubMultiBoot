@@ -36,6 +36,7 @@ G = {
     "link": '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
     "archive": '<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8m-10 4h4"/>',
     "rotate": '<path d="M3 12a9 9 0 1 0 9-9a9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+    "check": '<path d="M20 6L9 17l-5-5"/>',
     "shield": '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12l2 2l4-4"/>',
 }
 
@@ -229,6 +230,11 @@ def build(scale, sub):
                             ("archive", "#F59E0B", "a_backups"), ("globe", "#22D3EE", "a_online"),
                             ("link", "#A78BFA", "a_url"), ("folder", "#FBBF24", "a_file")):
         key_icon(name, col, S(64)).save(os.path.join(out, file + ".png"))
+    cb = Image.new("RGBA", (S(44), S(44)), (0, 0, 0, 0))
+    ImageDraw.Draw(cb).rounded_rectangle([1, 1, S(44) - 2, S(44) - 2], S(10), outline=(139, 152, 176, 255), width=max(2, S(3)))
+    cb.save(os.path.join(out, "cb_off.png"))
+    on = key_icon("check", "#22C55E", S(44))
+    on.save(os.path.join(out, "cb_on.png"))
     for key, text, col in (("running", "EN COURS", "#22C55E"), ("next", "PROCHAIN DÉMARRAGE", "#22D3EE"),
                            ("once", "UNE FOIS", "#F59E0B"), ("empty", "VIDE", "#94A3B8"),
                            ("recovery", "RECOVERY", "#A78BFA"), ("beta", "BÊTA", "#F59E0B"),
