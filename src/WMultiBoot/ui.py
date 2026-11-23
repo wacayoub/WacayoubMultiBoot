@@ -501,8 +501,8 @@ class WMBMain(Base):
         self["key_red"] = Label("Supprimer")
         self["key_green"] = Label("Démarrer")
         self["key_yellow"] = Label("Installer")
-        self["key_blue"] = Label("Sauvegardes")
-        self["key_menu"] = Label("Menu")
+        self["key_blue"] = Label("Sauvegarder")
+        self["key_menu"] = Label("Restaurer · Menu")
         lst = self["list"].l
         lst.setFont(0, gFont(FONT_B, S(30)))
         lst.setFont(1, gFont(FONT_R, S(22)))
@@ -580,7 +580,7 @@ class WMBMain(Base):
             self["list"].moveToIndex(idx)
             log("UI: list %d rows, select %d" % (len(rows), idx))
         for name, cap, label in (("key_red", "delete", "Supprimer"), ("key_green", "boot", "Démarrer"),
-                                 ("key_yellow", "install", "Installer"), ("key_blue", "backup", "Sauvegardes")):
+                                 ("key_yellow", "install", "Installer"), ("key_blue", "backup", "Sauvegarder")):
             self[name].setText(label if lay.can(cap) else "—")
         self.fill_storage()
         self.update_details()
@@ -692,7 +692,7 @@ class WMBMain(Base):
         if lay.notes and not s.running:
             hint = " · ".join(lay.notes)
         elif s.running:
-            hint = "Image en cours  ·  OK : options  ·  BLEU : sauvegarder  ·  JAUNE : installer une autre image"
+            hint = "Image en cours  ·  BLEU : sauvegarder  ·  MENU : restaurer  ·  JAUNE : installer une autre image"
         elif s.empty:
             hint = "Slot vide  ·  JAUNE : installer une image ici"
         else:
@@ -764,18 +764,17 @@ class WMBMain(Base):
             items.append(dict(icon="a_install", title="Installer une image…", value="install",
                               sub="Images en ligne, adresse internet ou fichier zip"))
         if lay.can("backup") and not s.empty and s.kind != "recovery":
-            items.append(dict(icon="a_backup", title="Sauvegarder cette image", value="backup",
-                              sub="Copie complète en .tar.gz, restaurable plus tard"))
             items.append(dict(icon="a_settings", title="Sauvegarder… (choisir quoi)", value="settings",
                               sub="Chaînes, satellites, réglages, plugins, softcam, réseau, picons"))
+            items.append(dict(icon="a_backup", title="Sauvegarder l'image complète", value="backup",
+                              sub="Tout le système, restaurable comme nouvelle image"))
         if s.kind in ("chroot", "omb") and not s.running and not s.empty:
             items.append(dict(icon="a_copy", title="Copier mes chaînes dans cette image", value="copy",
                               sub="Chaînes, favoris et satellites de l'image en cours"))
-        if s.info:
-            bks = [b for b in core.list_backups() if b["image"] == s.info["label"]]
-            if bks:
-                items.append(dict(icon="a_backups", title="Sauvegardes de cette image (%d)" % len(bks), value="backups",
-                                  sub="Dernière : %s  ·  voir, restaurer, supprimer" % bks[0]["date"]))
+        if s.running or (s.kind in ("chroot", "omb") and not s.empty):
+            if core.list_backups():
+                items.append(dict(icon="a_backups", title="Restaurer une sauvegarde dans cette image", value="restore",
+                                  sub="Choisir la sauvegarde, puis quoi restaurer"))
         if s.root and os.path.isdir(s.root):
             items.append(dict(icon="a_size", title="Calculer la taille", value="size", sub=s.where))
         if lay.can("delete") and s.deletable and not s.running:
@@ -792,8 +791,7 @@ class WMBMain(Base):
         {"boot": lambda: self.boot(False), "once": lambda: self.boot(True), "install": self.key_yellow,
          "backup": lambda: self.backup_slot(s, False), "settings": lambda: self.backup_choose(s),
          "copy": lambda: self.copy_channels(s), "delete": self.key_red, "size": self.calc_size,
-         "backups": lambda: self.image_backups(s.info["label"], [b for b in core.list_backups()
-                                                                  if b["image"] == s.info["label"]])}[what]()
+         "restore": lambda: self.restore_start(s)}[what]()
 
     @safe
     def key_green(self):
@@ -856,6 +854,7 @@ class WMBMain(Base):
             raise MBError("Aucun disque (HDD/USB) monté pour recevoir la sauvegarde.")
         return t
 
+    @safe
     def with_target(self, title, cb):
         targets = self.backup_targets()
         if len(targets) == 1:
@@ -912,107 +911,83 @@ class WMBMain(Base):
                                           "Que sauvegarder ?", "Image : %s" % s.title(), items, "Sauvegarder")
         self.session.openWithCallback(closed, WMBProgress, job, True)
 
+    # ===== SAUVEGARDER (touche bleue) : création uniquement
     @safe
     def key_blue(self):
         if not self.ready():
             return
         s = self.current()
+        if not s or s.empty or s.kind == "recovery":
+            raise MBError("Choisissez d'abord une image à sauvegarder.")
+        if not self.mbl.can("backup"):
+            raise MBError("La sauvegarde n'est pas disponible sur ce récepteur.")
+        n = len([b for b in core.list_backups() if s.info and b["image"] == s.info["label"]])
+        items = [dict(icon="a_settings", title="Choisir quoi sauvegarder…", value="custom",
+                      sub="Chaînes, satellites, réglages, plugins, softcam, réseau, picons"),
+                 dict(icon="a_backup", title="Sauvegarder l'image complète", value="full",
+                      sub="Tout le système, restaurable comme nouvelle image")]
+        self.mb_pick("Sauvegarder « %s »" % s.title(), items,
+                     lambda v: self.backup_choose(s) if v == "custom" else self.backup_slot(s),
+                     "Cette image a déjà %d sauvegarde%s  ·  pour restaurer : touche MENU" % (n, "s" if n > 1 else ""))
+
+    # ===== RESTAURER (menu) : choisir une sauvegarde, quoi, et où
+    def backup_groups_items(self, prefer=None):
         items = []
-        if s and not s.empty and self.mbl.can("backup") and s.kind != "recovery":
-            items.append(dict(icon="a_settings", title="Nouvelle sauvegarde… (choisir quoi)", value=("custom", None),
-                              sub="De « %s » : chaînes, satellites, réglages, plugins, softcam, réseau, picons" % s.title()))
-            items.append(dict(icon="a_backup", title="Sauvegarder l'image complète", value=("full", None),
-                              sub="Tout le système de « %s », restaurable comme nouvelle image" % s.title()))
         groups = core.backups_by_image()
-        mine = s.info["label"] if (s and s.info) else None
-        groups.sort(key=lambda g: 0 if g[0] == mine else 1)          # selected image first
+        groups.sort(key=lambda g: 0 if g[0] == prefer else 1)
         for label, bks in groups:
             total = sum(b["size"] for b in bks)
-            items.append(dict(icon="d_" + core.distro_key(label), title="Sauvegardes de %s" % label, value=("group", (label, bks)),
-                              sub="%d sauvegarde%s  ·  dernière : %s  ·  %s au total" % (
+            items.append(dict(icon="d_" + core.distro_key(label), title=label, value=(label, bks),
+                              sub="%d sauvegarde%s  ·  dernière : %s  ·  %s" % (
                                   len(bks), "s" if len(bks) > 1 else "", bks[0]["date"], human_mb(max(1, total)))))
-        if len(items) <= 2:
-            items.append(dict(icon="a_help", title="Aucune sauvegarde pour le moment", value=("none", None),
-                              sub="Les sauvegardes sont rangées dans <disque>/WMultiBoot/backups"))
-        self.mb_pick("Sauvegardes", items, self.backup_action, "Créer, voir, restaurer ou supprimer une sauvegarde")
+        return items
+
+    def backups_items(self, bks):
+        return [dict(icon="a_backups" if b["kind"] == "slot" else "a_settings", title=b["date"], value=b,
+                     sub="%s  ·  %s  ·  %s" % ("image complète" if b["kind"] == "slot" else "éléments choisis",
+                                               human_mb(max(1, b["size"])), b["mount"])) for b in bks]
 
     @safe
-    def backup_action(self, value):
-        what, b = value
-        if what == "full":
-            self.backup_slot(self.current())
-        elif what == "custom":
-            self.backup_choose(self.current())
-        elif what == "open":
-            self.open_backup(b)
-        elif what == "group":
-            self.image_backups(*b)
-
-    @safe
-    def image_backups(self, label, bks):
-        items = []
-        for b in bks:
-            full = b["kind"] == "slot"
-            items.append(dict(icon="a_backups" if full else "a_settings", title=b["date"],
-                              value=("open", b), pill=None,
-                              sub="%s  ·  %s  ·  %s" % ("image complète" if full else "éléments choisis",
-                                                        human_mb(max(1, b["size"])), b["name"])))
+    def restore_start(self, target=None):
+        """target: restore into this image (from the image's OK menu), else ask later."""
+        if not self.ready():
+            return
+        items = self.backup_groups_items(target.info["label"] if (target and target.info) else None)
         if not items:
-            items.append(dict(icon="a_help", title="Aucune sauvegarde pour cette image", value=("none", None), sub=""))
-        self.mb_pick("Sauvegardes de %s" % label, items, self.backup_action,
-                     "%d sauvegarde%s  ·  OK : voir, restaurer ou supprimer" % (len(bks), "s" if len(bks) > 1 else ""))
+            raise MBError("Aucune sauvegarde trouvée.\nCréez-en une avec la touche BLEUE.")
+        self.mb_pick("Restaurer : sauvegardes de quelle image ?", items,
+                     lambda v: self.restore_pick_backup(v[0], v[1], target),
+                     "Les sauvegardes sont rangées par image d'origine")
 
     @safe
-    def open_backup(self, b):
+    def restore_pick_backup(self, label, bks, target):
+        self.mb_pick("Restaurer : sauvegarde de %s" % label, self.backups_items(bks),
+                     lambda b: self.restore_open(b, target), "Choisissez la date")
+
+    @safe
+    def restore_open(self, b, target):
         job = Job("Lecture de la sauvegarde").start(lambda j: core.read_backup(b["path"]))
 
         def closed(j=None):
-            if job.ok:
-                self.backup_menu(b, job.result)
+            if not job.ok:
+                return
+            info = job.result
+            if info["kind"] == "slot":
+                if not self.mbl.can("install"):
+                    self.mb_error("Restaurer une image complète n'est pas possible sur ce récepteur.")
+                    return
+                self.mb_ask("Cette sauvegarde est une image complète (%s).\n\nLa restaurer comme NOUVELLE image ?\n"
+                            "L'image en cours ne change pas." % human_mb(max(1, b["size"])),
+                            lambda: self.install_from(b["path"], os.path.basename(b["path"])), default=True)
+            elif not info["categories"]:
+                self.mb_error("Cette sauvegarde est vide.")
+            else:
+                self.restore_choose(b, info, target)
         self.session.openWithCallback(closed, WMBProgress, job, True)
 
-    def backup_contents_text(self, b, info):
-        if info["kind"] == "slot":
-            return "Image complète (tout le système).\n%s · %s" % (b["date"], human_mb(max(1, b["size"])))
+    @safe
+    def restore_choose(self, b, info, target=None):
         man = info["manifest"]
-        lines = ["Sauvegarde de : %s" % man.get("image", "?"), "Date : %s" % (man.get("date") or b["date"]), ""]
-        for key, title, desc, warn in core.CATEGORIES:
-            n = info["categories"].get(key)
-            if n:
-                lines.append("• %s : %d %s" % (title, n, "plugins" if key == "plugins" else "fichiers"))
-        return "\n".join(lines)
-
-    @safe
-    def backup_menu(self, b, info):
-        items = []
-        if info["kind"] == "slot":
-            if self.mbl.can("install"):
-                items.append(dict(icon="a_install", title="Restaurer comme nouvelle image", value="restore_image",
-                                  sub="Installe cette sauvegarde dans un nouveau slot (l'image en cours ne change pas)"))
-        elif info["categories"]:
-            items.append(dict(icon="a_settings", title="Restaurer… (choisir quoi et où)", value="restore",
-                              sub="Parmi : %s" % ", ".join(core.CAT_TITLES[k] for k, _, _, _ in core.CATEGORIES
-                                                            if k in info["categories"])))
-        items.append(dict(icon="a_help", title="Voir le contenu", value="show", sub="Ce que contient exactement cette sauvegarde"))
-        items.append(dict(icon="a_delete", title="Supprimer cette sauvegarde", value="delete",
-                          sub="Libère %s" % human_mb(max(1, b["size"]))))
-
-        def act(what):
-            if what == "restore_image":
-                self.install_from(b["path"], os.path.basename(b["path"]))
-            elif what == "restore":
-                self.restore_choose(b, info)
-            elif what == "show":
-                self.mb_info(self.backup_contents_text(b, info))
-            elif what == "delete":
-                self.mb_ask("Supprimer définitivement la sauvegarde\n%s ?" % b["name"],
-                            lambda: self.run_job("Suppression de la sauvegarde",
-                                                 lambda job: (core.delete_backup(b["path"]), "Sauvegarde supprimée.")[1],
-                                                 rescan=False))
-        self.mb_pick(b["name"].replace(".tar.gz", ""), items, act, "%s  ·  %s" % (b["date"], human_mb(max(1, b["size"]))))
-
-    @safe
-    def restore_choose(self, b, info):
         items = []
         for key, title, desc, warn in core.CATEGORIES:
             n = info["categories"].get(key)
@@ -1021,14 +996,15 @@ class WMBMain(Base):
                                   sub="%d %s  ·  %s" % (n, "plugins" if key == "plugins" else "fichiers", desc)))
 
         def chosen(keys):
+            if target is not None:
+                self.restore_confirm(b, keys, target)
+                return
             targets = [s for s in self.mbl.slots if s.kind in ("chroot", "omb") and not s.empty]
             run = self.mbl.running_slot()
             if run is None or run not in targets:
                 targets.insert(0, run or core.Slot("running", 0, "flash", running=True, info={"label": "Image en cours"}))
             pick = []
             for s in targets:
-                if s is None:
-                    continue
                 pick.append(dict(icon="d_" + core.distro_key((s.info or {}).get("distro", "")), title=s.title(), value=s,
                                  sub=("Image en cours : l'interface redémarre pour appliquer" if s.running
                                       else "Autre image : les fichiers sont écrits directement"),
@@ -1036,10 +1012,13 @@ class WMBMain(Base):
             self.mb_pick("Restaurer dans quelle image ?", pick, lambda s: self.restore_confirm(b, keys, s),
                          "Éléments : %s" % ", ".join(core.CAT_TITLES[k] for k in keys))
         self.session.openWithCallback(lambda keys=None: keys and chosen(keys), WMBChecklist,
-                                      "Que restaurer ?", b["name"].replace(".tar.gz", ""), items, "Continuer")
+                                      "Que restaurer ?", "Sauvegarde de %s du %s" % (man.get("image", b["image"]), b["date"]),
+                                      items, "Continuer")
 
     @safe
     def restore_confirm(self, b, keys, s):
+        if not s.running:
+            core.guard_not_running(s)
         what = ", ".join(core.CAT_TITLES[k] for k in keys)
         text = "Restaurer dans « %s » :\n%s\n\n" % (s.title(), what)
         if s.running:
@@ -1053,24 +1032,64 @@ class WMBMain(Base):
             def work(job):
                 if s.running:
                     st = core.storage_for(b["path"]) or (core.storages() or [None])[0]
-                    if st:
+                    safe_keys = [k for k in keys if k != "picons"]
+                    if st and safe_keys:
                         job.say("Sauvegarde de sécurité avant restauration…", 2)
-                        safe_keys = [k for k in keys if k not in ("picons",)]
-                        if safe_keys:
-                            try:
-                                core.backup_custom(job, s, safe_keys, st["mount"], lay)
-                            except core.Cancelled:
-                                raise
-                            except MBError as e:
-                                log("pre-restore backup: %s" % e)
+                        try:
+                            core.backup_custom(job, s, safe_keys, st["mount"], lay)
+                        except core.Cancelled:
+                            raise
+                        except MBError as e:
+                            log("pre-restore backup: %s" % e)
                         job.progress = 0
                 return core.restore_custom(job, b["path"], keys, s, lay)
             self.run_job("Restauration", work, rescan=not s.running)
         self.mb_ask(text, go, default=True)
 
+    # ===== GÉRER (menu) : voir le contenu, supprimer
     @safe
-    def restore_settings_to(self, b):
-        self.open_backup(b)
+    def manage_backups(self):
+        items = self.backup_groups_items()
+        if not items:
+            raise MBError("Aucune sauvegarde trouvée.")
+        self.mb_pick("Gérer les sauvegardes", items,
+                     lambda v: self.mb_pick("Sauvegardes de %s" % v[0], self.backups_items(v[1]), self.manage_one,
+                                            "OK : voir le contenu ou supprimer"),
+                     "Voir le contenu ou supprimer pour libérer de la place")
+
+    @safe
+    def manage_one(self, b):
+        job = Job("Lecture de la sauvegarde").start(lambda j: core.read_backup(b["path"]))
+
+        def closed(j=None):
+            if not job.ok:
+                return
+            info = job.result
+            items = [dict(icon="a_help", title="Voir le contenu", value="show", sub=self.backup_contents_text(b, info).split("\n")[0]),
+                     dict(icon="a_delete", title="Supprimer cette sauvegarde", value="delete",
+                          sub="Libère %s  ·  %s" % (human_mb(max(1, b["size"])), b["name"]))]
+
+            def act(what):
+                if what == "show":
+                    self.mb_info(self.backup_contents_text(b, info))
+                else:
+                    self.mb_ask("Supprimer définitivement la sauvegarde du %s ?\n%s" % (b["date"], b["name"]),
+                                lambda: self.run_job("Suppression de la sauvegarde",
+                                                     lambda jb: (core.delete_backup(b["path"]), "Sauvegarde supprimée.")[1],
+                                                     rescan=False))
+            self.mb_pick("Sauvegarde du %s" % b["date"], items, act, b["image"])
+        self.session.openWithCallback(closed, WMBProgress, job, True)
+
+    def backup_contents_text(self, b, info):
+        if info["kind"] == "slot":
+            return "Image complète de %s (tout le système).\n%s · %s" % (b["image"], b["date"], human_mb(max(1, b["size"])))
+        man = info["manifest"]
+        lines = ["Sauvegarde de : %s" % man.get("image", b["image"]), "Date : %s" % (man.get("date") or b["date"]), ""]
+        for key, title, desc, warn in core.CATEGORIES:
+            n = info["categories"].get(key)
+            if n:
+                lines.append("• %s : %d %s" % (title, n, "plugins" if key == "plugins" else "fichiers"))
+        return "\n".join(lines)
 
     @safe
     def copy_channels(self, s):
@@ -1237,7 +1256,10 @@ class WMBMain(Base):
         items = []
         if self.mbl and self.mbl.can("install"):
             items.append(dict(icon="a_online", title="Installer une image", value="install", sub="En ligne, URL ou fichier"))
-        items += [dict(icon="a_backups", title="Sauvegardes", value="backups", sub="Créer, restaurer, supprimer"),
+        items = [dict(icon="a_backups", title="Restaurer une sauvegarde", value="restore",
+                      sub="Choisir l'image, la date, quoi restaurer et où")] + items
+        items += [dict(icon="a_backup", title="Sauvegarder", value="backups", sub="Même chose que la touche BLEUE"),
+                  dict(icon="a_delete", title="Gérer les sauvegardes", value="manage", sub="Voir le contenu, supprimer"),
                   dict(icon="a_disk", title="Espace disque", value="space", sub=self.space_text() if self.mbl else ""),
                   dict(icon="a_once", title="Actualiser", value="rescan", sub="Relire les images et les disques"),
                   dict(icon="a_help", title="Aide et compatibilité", value="help", sub="Récepteurs pris en charge, sécurité"),
@@ -1252,6 +1274,10 @@ class WMBMain(Base):
             self.key_yellow()
         elif what == "backups":
             self.key_blue()
+        elif what == "restore":
+            self.restore_start()
+        elif what == "manage":
+            self.manage_backups()
         elif what == "space":
             lines = ["%s (%s) : %s libres sur %s" % (st["mount"], st["fstype"], human_mb(st["free"]), human_mb(st["total"]))
                      for st in core.storages()]
@@ -1268,8 +1294,8 @@ class WMBMain(Base):
 
 HELP = """Wacayoub MultiBoot %s
 
-VERT : démarrer sur l'image choisie.  OK : toutes les options (démarrer une seule fois pour essayer, copier les chaînes…).
-JAUNE : installer une image (en ligne, URL, fichier).  BLEU : sauvegardes.  ROUGE : supprimer.
+VERT : démarrer sur l'image choisie.  OK : toutes les options (démarrer une seule fois, copier les chaînes…).
+JAUNE : installer une image.  BLEU : sauvegarder.  MENU : restaurer une sauvegarde, gérer les sauvegardes.  ROUGE : supprimer.
 
 Structures reconnues automatiquement :
 • HDD/USB (omb-init) : Vu+ 4K et autres.

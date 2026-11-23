@@ -1,9 +1,17 @@
 # Wacayoub MultiBoot
 
 Gestionnaire multiboot pour Enigma2, inspiré du « Multiboot Manager » d'Octagon (fonctions seulement, code écrit de zéro).
-Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.2.1_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
+Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.3.0_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
 
 Ouverture : Menu Plugins, menu Extensions, ou Menu > Système.
+
+## Nouveautés 1.3.0
+
+- Sauvegarder et Restaurer sont séparés :
+  - **BLEU = Sauvegarder** (création seulement) : « Choisir quoi sauvegarder… » ou « Image complète ».
+  - **MENU → Restaurer une sauvegarde** : image d'origine → date → éléments à cocher → image de destination → confirmation.
+    Aussi dans le menu OK d'une image : « Restaurer une sauvegarde dans cette image » (la destination est déjà choisie).
+  - **MENU → Gérer les sauvegardes** : voir le contenu, supprimer.
 
 ## Nouveautés 1.2.x
 
@@ -42,9 +50,9 @@ Ouverture : Menu Plugins, menu Extensions, ou Menu > Système.
 | OK | Actions du slot : démarrer, démarrer **une seule fois** (retour automatique sur l'image d'avant), installer, sauvegarder, taille, supprimer |
 | Vert | Démarrer sur le slot choisi (puis propose de redémarrer) |
 | Jaune | Installer une image : **Images en ligne** (OpenATV, OpenPLi, OpenViX, OpenBH, OpenSPA, PurE2, OpenDroid, OpenVision, OpenHDF, EGAMI, teamBlue, filtrées pour le modèle détecté), une URL, ou un zip / une sauvegarde `.tar.gz` sur les disques |
-| Bleu | Sauvegardes : complète ou réglages seuls, liste, restaurer, supprimer (`<disque>/WMultiBoot/backups`) |
+| Bleu | Sauvegarder : choisir quoi, ou l'image complète (`<disque>/WMultiBoot/backups`) |
+| MENU | Restaurer une sauvegarde, gérer les sauvegardes (voir, supprimer), espace disque, aide |
 | Rouge | Supprimer un slot |
-| MENU | Actualiser, espace disque, journal, aide |
 
 Affichage : nom, version, date de chaque image, slot en cours, prochain démarrage, espace libre des disques.
 Polices : Roboto / Liberation / DejaVu si l'image les a, sinon la police `Regular` du skin.
