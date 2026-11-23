@@ -375,8 +375,6 @@ class WMBPicker(Base):
                 row.append(PixEntry(pos=(x, S(12)), size=(S(68), S(68)), png=icon))
             pl = pix(it["pill"]) if it.get("pill") else None
             pw = pl.size().width() if pl else 0
-            if pl:
-                row.append(PixEntry(pos=(w - pw - S(16), S(27)), size=(pw, S(38)), png=pl))
             tw = w - S(110) - pw - S(30)
             row.append(MultiContentEntryText(pos=(S(104), S(8)), size=(tw, S(44)), font=0,
                                              flags=RT_HALIGN_LEFT | RT_VALIGN_CENTER, text=it.get("title", ""),
@@ -384,6 +382,8 @@ class WMBPicker(Base):
             row.append(MultiContentEntryText(pos=(S(104), S(50)), size=(w - S(120), S(34)), font=1,
                                              flags=RT_HALIGN_LEFT | RT_VALIGN_CENTER, text=it.get("sub", ""),
                                              color=C_MUTED, color_sel=0xdbeafe))
+            if pl:                      # drawn last: the subtitle box must not hide it
+                row.append(PixEntry(pos=(w - pw - S(16), S(27)), size=(pw, S(38)), png=pl))
             rows.append(row)
         self["list"].setList(rows)
 
@@ -1508,6 +1508,8 @@ class WMBMain(Base):
         items.append(dict(icon="a_online", title="Choisir une autre image en ligne…", value=("other", None),
                           sub="Autre version ou autre distribution"))
         for label, path, size in core.find_local_images()[:20]:
+            if "-backup-" in os.path.basename(path) or "/backups/" in path:
+                continue                    # full backups are restored, not used as updates
             items.append(dict(icon="a_file", title=os.path.basename(path), value=("file", path),
                               sub="%s  ·  %s" % (human_mb(size), os.path.dirname(path))))
         sub = "Vos chaînes, réglages et plugins sont gardés  ·  l'ancienne image reste disponible"
