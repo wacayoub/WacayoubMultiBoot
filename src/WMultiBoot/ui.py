@@ -139,11 +139,23 @@ def _list(name, x, y, w, h, sel):
 
 def _keys():
     out = []
-    for i, (name, icon) in enumerate((("key_red", "k_red"), ("key_green", "k_green"), ("key_yellow", "k_yellow"),
-                                      ("key_blue", "k_blue"), ("key_menu", "k_menu"))):
-        x = 60 + i * 370
-        out.append(_pixmap(img(icon), x, 1020, 40, 40, 2))
-        out.append(_w(name, x + 54, 1008, 300, 64, FONT_R, 26, C_TEXT))
+    for i, (name, icon) in enumerate((("key_red", "b_red"), ("key_green", "b_green"), ("key_yellow", "b_yellow"),
+                                      ("key_blue", "b_blue"), ("key_menu", "b_menu"))):
+        x = 40 + i * 372
+        out.append('<widget name="%s_bg" position="%d,%d" size="%d,%d" alphatest="blend" zPosition="1"/>'
+                   % (name, S(x), S(1010), S(340), S(60)))
+        out.append(_w(name, x + 66, 1010, 262, 60, FONT_B, 25, C_TEXT))
+    return "".join(out)
+
+
+def _footer(y=890):
+    """4 slots: chip (OK / EXIT / colour) + label, set at runtime with set_footer()."""
+    out = []
+    for i in range(4):
+        x = 300 + i * 330
+        out.append('<widget name="f%d_icon" position="%d,%d" size="%d,%d" alphatest="blend" zPosition="2"/>'
+                   % (i, S(x), S(y), S(84), S(40)))
+        out.append(_w("f%d_text" % i, x + 96, y - 4, 230, 48, FONT_R, 24, C_TEXT))
     return "".join(out)
 
 
@@ -183,8 +195,29 @@ def picker_skin():
          _w("title", 300, 140, 1320, 56, FONT_B, 38, C_TEXT),
          _w("subtitle", 300, 236, 1320, 40, FONT_R, 24, C_MUTED),
          _list("list", 306, 290, 1308, 552, "sel_picker"),
-         _w("hint", 300, 880, 1320, 50, FONT_R, 24, C_MUTED)]
+         _footer()]
     return _screen("WMultiBootPicker", "".join(b))
+
+
+MENU_COLS, MENU_W, MENU_H, MENU_X, MENU_Y, MENU_DX, MENU_DY = 4, 330, 240, 284, 270, 340, 270
+
+
+def menu_skin(n):
+    b = [_bg("bg_picker"), _pixmap(img("logo"), 300, 136, 64, 64),
+         _w("title", 384, 136, 1200, 64, FONT_B, 40, C_TEXT),
+         _w("subtitle", 300, 222, 1320, 40, FONT_R, 24, C_MUTED),
+         '<widget name="sel" position="%d,%d" size="%d,%d" alphatest="blend" zPosition="1"/>'
+         % (S(MENU_X), S(MENU_Y), S(MENU_W), S(MENU_H))]
+    for i in range(n):
+        x = MENU_X + (i % MENU_COLS) * MENU_DX
+        y = MENU_Y + (i // MENU_COLS) * MENU_DY
+        b.append(_pixmap(img("tile"), x, y, MENU_W, MENU_H, 0))
+        b.append('<widget name="t%d_icon" position="%d,%d" size="%d,%d" alphatest="blend" zPosition="3"/>'
+                 % (i, S(x + (MENU_W - 96) // 2), S(y + 28), S(96), S(96)))
+        b.append(_w("t%d_title" % i, x + 10, y + 136, MENU_W - 20, 44, FONT_B, 28, C_TEXT, "center"))
+        b.append(_w("t%d_sub" % i, x + 14, y + 180, MENU_W - 28, 40, FONT_R, 20, C_MUTED, "center"))
+    b.append(_footer())
+    return _screen("WMultiBootMenu%d" % n, "".join(b))
 
 
 def progress_skin():
@@ -195,7 +228,7 @@ def progress_skin():
          'backgroundColor="%s" zPosition="2"/>' % (S(300), S(330), S(1180), S(16), hexc(C_ACCENT), hexc(C_LINE)),
          _w("percent", 1500, 312, 120, 52, FONT_B, 30, C_TEXT, "right"),
          _w("log", 300, 390, 1320, 450, FONT_R, 23, C_MUTED, "left", "top"),
-         _w("hint", 300, 880, 1320, 50, FONT_R, 24, C_TEXT)]
+         _w("hint", 300, 840, 1320, 40, FONT_R, 22, C_MUTED), _footer()]
     return _screen("WMultiBootProgress", "".join(b))
 
 
@@ -282,6 +315,31 @@ class Base(Screen):
         except Exception:
             pass
 
+    def init_footer(self):
+        for i in range(4):
+            self["f%d_icon" % i] = Pixmap()
+            self["f%d_text" % i] = Label("")
+
+    def footer_init(self):
+        self.set_footer(getattr(self, "footer_pairs", None) or [("c_ok", "Choisir"), ("c_exit", "Retour")])
+
+    def set_footer(self, pairs):
+        """pairs: [(chip name, text)] e.g. [("c_ok", "Choisir"), ("c_exit", "Retour")]."""
+        for i in range(4):
+            icon, text = pairs[i] if i < len(pairs) else (None, "")
+            self["f%d_text" % i].setText(text)
+            w = self["f%d_icon" % i]
+            p = pix(icon) if icon else None
+            try:
+                if w.instance:
+                    if p:
+                        w.instance.setPixmap(p)
+                        w.show()
+                    else:
+                        w.hide()
+            except Exception as e:
+                log("footer: %s" % e)
+
 
 # --------------------------------------------------------------------------- picker
 
@@ -295,7 +353,7 @@ class WMBPicker(Base):
         self.pick_items = items
         self["title"] = Label(title)
         self["subtitle"] = Label(subtitle)
-        self["hint"] = Label("OK : choisir    ·    EXIT : retour")
+        self.init_footer()
         self["list"] = MenuList([], enableWrapAround=True, content=eListboxPythonMultiContent)
         lst = self["list"].l
         lst.setFont(0, gFont(FONT_B, S(30)))
@@ -303,6 +361,7 @@ class WMBPicker(Base):
         lst.setItemHeight(S(92))
         self["actions"] = ActionMap(["OkCancelActions"], {"ok": self.pick_ok, "cancel": self.pick_cancel}, -1)
         self.onLayoutFinish.append(self.fill_rows)
+        self.onLayoutFinish.append(self.footer_init)
         self.mb_title(title)
 
     def fill_rows(self):
@@ -347,7 +406,9 @@ class WMBChecklist(Base):
         self.check_items = items
         self["title"] = Label(title)
         self["subtitle"] = Label(subtitle)
-        self["hint"] = Label("OK : cocher / décocher    ·    VERT : %s    ·    JAUNE : tout    ·    EXIT : retour" % action)
+        self.init_footer()
+        self.footer_pairs = [("c_ok", "Cocher"), ("c_green", action), ("c_yellow", "Tout"), ("c_exit", "Retour")]
+        self.onLayoutFinish.append(self.footer_init)
         self["list"] = MenuList([], enableWrapAround=True, content=eListboxPythonMultiContent)
         lst = self["list"].l
         lst.setFont(0, gFont(FONT_B, S(30)))
@@ -406,6 +467,66 @@ class WMBChecklist(Base):
         self.close(None)
 
 
+class WMBMenu(Base):
+    """Tile grid: arrows move, OK opens, EXIT closes."""
+
+    def __init__(self, session, tiles, title, subtitle=""):
+        setup_fonts()
+        self.tiles = tiles[:8]
+        self.skin = menu_skin(len(self.tiles))
+        Base.__init__(self, session)
+        self.idx = 0
+        self["title"] = Label(title)
+        self["subtitle"] = Label(subtitle)
+        self["sel"] = Pixmap()
+        for i, (key, icon, t, sub) in enumerate(self.tiles):
+            self["t%d_icon" % i] = Pixmap()
+            self["t%d_title" % i] = Label(t)
+            self["t%d_sub" % i] = Label(sub)
+        self.init_footer()
+        self["actions"] = ActionMap(["OkCancelActions", "DirectionActions"], {
+            "ok": self.menu_ok, "cancel": self.menu_cancel, "left": lambda: self.menu_move(-1),
+            "right": lambda: self.menu_move(1), "up": lambda: self.menu_move(-MENU_COLS),
+            "down": lambda: self.menu_move(MENU_COLS)}, -1)
+        self.onLayoutFinish.append(self.paint)
+        self.mb_title(title)
+
+    def paint(self):
+        try:
+            if pix("tile_sel"):
+                self["sel"].instance.setPixmap(pix("tile_sel"))
+            for i, (key, icon, t, sub) in enumerate(self.tiles):
+                if pix(icon):
+                    self["t%d_icon" % i].instance.setPixmap(pix(icon))
+        except Exception as e:
+            log("menu paint: %s" % e)
+        self.set_footer([("c_arrows", "Choisir"), ("c_ok", "Ouvrir"), ("c_exit", "Fermer")])
+        self.menu_move(0)
+
+    def menu_move(self, d):
+        n = len(self.tiles)
+        if not n:
+            return
+        i = self.idx + d
+        if d in (-MENU_COLS, MENU_COLS) and not 0 <= i < n:
+            i = self.idx
+        self.idx = i % n
+        x = MENU_X + (self.idx % MENU_COLS) * MENU_DX
+        y = MENU_Y + (self.idx // MENU_COLS) * MENU_DY
+        try:
+            from enigma import ePoint
+            self["sel"].instance.move(ePoint(S(x), S(y)))
+        except Exception as e:
+            log("menu move: %s" % e)
+
+    def menu_ok(self):
+        if self.tiles:
+            self.close(self.tiles[self.idx][0])
+
+    def menu_cancel(self):
+        self.close(None)
+
+
 # --------------------------------------------------------------------------- progress
 
 class WMBProgress(Base):
@@ -420,7 +541,10 @@ class WMBProgress(Base):
         self["bar"] = ProgressBar()
         self["percent"] = Label("")
         self["log"] = Label("")
-        self["hint"] = Label("EXIT : annuler")
+        self["hint"] = Label("")
+        self.init_footer()
+        self.footer_pairs = [("c_exit", "Annuler")]
+        self.onLayoutFinish.append(self.footer_init)
         self["actions"] = ActionMap(["OkCancelActions"], {"ok": self.prog_ok, "cancel": self.prog_cancel}, -1)
         self.timer = eTimer()
         self._conn = connect_timer(self.timer, self.poll)
@@ -452,7 +576,8 @@ class WMBProgress(Base):
             else:
                 self["step"].setText("Terminé" if j.ok else "Échec")
             self["log"].setText(j.result)
-            self["hint"].setText("OK : continuer")
+            self["hint"].setText("")
+            self.set_footer([("c_ok", "Continuer"), ("c_exit", "Fermer")])
 
     def prog_ok(self):
         if self.job.done:
@@ -502,7 +627,10 @@ class WMBMain(Base):
         self["key_green"] = Label("Démarrer")
         self["key_yellow"] = Label("Installer")
         self["key_blue"] = Label("Sauvegarder")
-        self["key_menu"] = Label("Restaurer · Menu")
+        self["key_menu"] = Label("Menu")
+        for k in ("key_red", "key_green", "key_yellow", "key_blue", "key_menu"):
+            self[k + "_bg"] = Pixmap()
+        self.onLayoutFinish.append(self.paint_keys)
         lst = self["list"].l
         lst.setFont(0, gFont(FONT_B, S(30)))
         lst.setFont(1, gFont(FONT_R, S(22)))
@@ -524,6 +652,21 @@ class WMBMain(Base):
         self.onShown.append(self.mb_on_shown)
         self.mb_title("Wacayoub MultiBoot")
         log("UI: main created")
+
+    def paint_keys(self):
+        lay = self.mbl
+        for name, cap, label, bg in (("key_red", "delete", "Supprimer", "b_red"), ("key_green", "boot", "Démarrer", "b_green"),
+                                     ("key_yellow", "install", "Installer", "b_yellow"),
+                                     ("key_blue", "backup", "Sauvegarder", "b_blue"), ("key_menu", None, "Menu", "b_menu")):
+            ok = cap is None or lay is None or lay.can(cap)
+            self[name].setText(label if ok else "")
+            w = self[name + "_bg"]
+            try:
+                if w.instance and pix(bg):
+                    w.instance.setPixmap(pix(bg))
+                    w.show() if ok else w.hide()
+            except Exception as e:
+                log("keys: %s" % e)
 
     @safe
     def mb_on_shown(self):
@@ -579,9 +722,7 @@ class WMBMain(Base):
         if rows:
             self["list"].moveToIndex(idx)
             log("UI: list %d rows, select %d" % (len(rows), idx))
-        for name, cap, label in (("key_red", "delete", "Supprimer"), ("key_green", "boot", "Démarrer"),
-                                 ("key_yellow", "install", "Installer"), ("key_blue", "backup", "Sauvegarder")):
-            self[name].setText(label if lay.can(cap) else "—")
+        self.paint_keys()
         self.fill_storage()
         self.update_details()
 
@@ -1275,6 +1416,30 @@ class WMBMain(Base):
     # ---- menu
     @safe
     def key_menu(self):
+        tiles = [("restore", "m_restore", "Restaurer", "une sauvegarde"),
+                 ("backups", "m_backup", "Sauvegarder", "choisir quoi"),
+                 ("install", "m_install", "Installer", "en ligne · URL · zip"),
+                 ("manage", "m_manage", "Sauvegardes", "voir · supprimer"),
+                 ("space", "m_space", "Espace disque", self.space_short()),
+                 ("rescan", "m_refresh", "Actualiser", "relire les images"),
+                 ("help", "m_help", "Aide", "touches · compatibilité"),
+                 ("log", "m_log", "Journal", "dernières actions")]
+        if self.mbl is not None and not self.mbl.can("install"):
+            tiles = [t for t in tiles if t[0] != "install"]
+        self.session.openWithCallback(lambda v=None: v and self.menu_action(v), WMBMenu, tiles,
+                                      "Wacayoub MultiBoot %s" % core.VERSION,
+                                      "%s %s  ·  %s" % (self.mbl.box["brand"], self.mbl.box["machine"], self.mbl.name)
+                                      if self.mbl else "")
+
+    def space_short(self):
+        caps = core.install_capacity()
+        if not caps:
+            return "aucun disque ext4"
+        st, n = caps[0]
+        return "%s libres · ~%d images" % (human_mb(st["free"]), n)
+
+    @safe
+    def key_menu_list(self):
         items = []
         if self.mbl and self.mbl.can("install"):
             items.append(dict(icon="a_online", title="Installer une image", value="install", sub="En ligne, URL ou fichier"))
@@ -1312,6 +1477,8 @@ class WMBMain(Base):
             self.mb_info(core.read_file(core.LOG_FILE)[-2500:] or "Journal vide.")
         elif what == "help":
             self.mb_info(HELP)
+        elif what == "list":
+            self.key_menu_list()
 
 
 HELP = """Wacayoub MultiBoot %s

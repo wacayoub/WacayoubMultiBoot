@@ -15,4 +15,7 @@ mine = set(re.findall(r"^    def (\w+)\(self", ui, re.M)) | set(re.findall(r"sel
 allowed = {"skin", "__init__", "close", "session", "setTitle"}
 bad = sorted(n for n in mine if n in names and n not in allowed and not n.startswith("__"))
 print("clashes:", bad)
-sys.exit(1 if bad else 0)
+# OpenATV runs non-method entries of onLayoutFinish/onShown… as skin applet code (exec) -> crash
+lam = re.findall(r"on(?:LayoutFinish|Shown|Show|ExecBegin|FirstExecBegin)\.append\(lambda", ui)
+print("lambda hooks:", len(lam))
+sys.exit(1 if (bad or lam) else 0)

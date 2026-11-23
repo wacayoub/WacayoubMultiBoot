@@ -203,6 +203,64 @@ def app_logo(size):
     return im
 
 
+def button(glyph_name, col, w, h):
+    """Rounded glass button with a coloured icon square on the left (label drawn by enigma2)."""
+    r, g, b = hexrgb(col)
+    im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    base = Image.new("RGBA", (w, h), (255, 255, 255, 18))
+    base.putalpha(Image.eval(rmask(w, h, h // 2), lambda v: v * 22 // 255))
+    im = Image.alpha_composite(im, base)
+    tint = gradient(w, h, "#%02x%02x%02x" % (r, g, b), "#0B1426")
+    tint.putalpha(Image.eval(rmask(w, h, h // 2), lambda v: v * 40 // 255))
+    im = Image.alpha_composite(im, tint)
+    edge = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    ImageDraw.Draw(edge).rounded_rectangle([1, 1, w - 2, h - 2], h // 2, outline=(r, g, b, 170), width=max(2, h // 24))
+    im = Image.alpha_composite(im, edge)
+    ic = key_icon(glyph_name, col, int(h * 0.72))
+    im.alpha_composite(ic, (int(h * 0.14), (h - ic.height) // 2))
+    return im
+
+
+def chip(text, w, h, col="#E8EDF5"):
+    im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.rounded_rectangle([1, 1, w - 2, h - 2], h // 3, fill=(255, 255, 255, 26), outline=(255, 255, 255, 90), width=max(1, h // 20))
+    f = fit_font(text, FONT_B, w * 0.8, h * 0.55, int(h * 0.55))
+    l, t, r, b = f.getbbox(text)
+    rr, gg, bb = hexrgb(col)
+    d.text(((w - (r - l)) / 2 - l, (h - (b - t)) / 2 - t), text, font=f, fill=(rr, gg, bb, 255))
+    return im
+
+
+def color_chip(col, w, h):
+    im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    r, g, b = hexrgb(col)
+    ImageDraw.Draw(im).rounded_rectangle([1, 1, w - 2, h - 2], h // 3, fill=(r, g, b, 255))
+    return im
+
+
+def tile_card(w, h, selected=False):
+    im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    if selected:
+        glow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        ImageDraw.Draw(glow).rounded_rectangle([6, 6, w - 7, h - 7], 26, outline=(34, 211, 238, 200), width=10)
+        im = Image.alpha_composite(im, glow.filter(ImageFilter.GaussianBlur(7)))
+        card = gradient(w - 12, h - 12, "#1D4ED8", "#0E7490")
+        card.putalpha(Image.eval(rmask(w - 12, h - 12, 24), lambda v: v * 235 // 255))
+        im.alpha_composite(card, (6, 6))
+        e = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        ImageDraw.Draw(e).rounded_rectangle([6, 6, w - 7, h - 7], 24, outline=(165, 243, 252, 230), width=2)
+        im = Image.alpha_composite(im, e)
+    else:
+        card = Image.new("RGBA", (w - 12, h - 12), (255, 255, 255, 255))
+        card.putalpha(Image.eval(rmask(w - 12, h - 12, 24), lambda v: v * 16 // 255))
+        im.alpha_composite(card, (6, 6))
+        e = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        ImageDraw.Draw(e).rounded_rectangle([6, 6, w - 7, h - 7], 24, outline=(255, 255, 255, 40), width=1)
+        im = Image.alpha_composite(im, e)
+    return im
+
+
 def build(scale, sub):
     out = os.path.join(OUT, sub)
     os.makedirs(out, exist_ok=True)
@@ -236,6 +294,23 @@ def build(scale, sub):
     cb.save(os.path.join(out, "cb_off.png"))
     on = key_icon("check", "#22C55E", S(44))
     on.save(os.path.join(out, "cb_on.png"))
+    for name, glyph_name, col in (("b_red", "trash", "#EF4444"), ("b_green", "power", "#22C55E"),
+                                  ("b_yellow", "download", "#EAB308"), ("b_blue", "save", "#3B82F6"),
+                                  ("b_menu", "menu", "#64748B")):
+        button(glyph_name, col, S(340), S(60)).save(os.path.join(out, name + ".png"))
+    chip("OK", S(64), S(40)).save(os.path.join(out, "c_ok.png"))
+    chip("EXIT", S(76), S(40)).save(os.path.join(out, "c_exit.png"))
+    chip("MENU", S(84), S(40)).save(os.path.join(out, "c_menu.png"))
+    chip("◄ ►", S(76), S(40)).save(os.path.join(out, "c_arrows.png"))
+    for n, col in (("c_green", "#22C55E"), ("c_yellow", "#EAB308"), ("c_red", "#EF4444"), ("c_blue", "#3B82F6")):
+        color_chip(col, S(40), S(40)).save(os.path.join(out, n + ".png"))
+    tile_card(S(330), S(240)).save(os.path.join(out, "tile.png"))
+    tile_card(S(330), S(240), True).save(os.path.join(out, "tile_sel.png"))
+    for name, col, file in (("archive", "#F59E0B", "m_restore"), ("save", "#3B82F6", "m_backup"),
+                            ("globe", "#22D3EE", "m_install"), ("trash", "#EF4444", "m_manage"),
+                            ("drive", "#0EA5E9", "m_space"), ("rotate", "#10B981", "m_refresh"),
+                            ("shield", "#8B5CF6", "m_help"), ("folder", "#64748B", "m_log")):
+        key_icon(name, col, S(96)).save(os.path.join(out, file + ".png"))
     for key, text, col in (("running", "EN COURS", "#22C55E"), ("next", "PROCHAIN DÉMARRAGE", "#22D3EE"),
                            ("once", "UNE FOIS", "#F59E0B"), ("empty", "VIDE", "#94A3B8"),
                            ("recovery", "RECOVERY", "#A78BFA"), ("beta", "BÊTA", "#F59E0B"),

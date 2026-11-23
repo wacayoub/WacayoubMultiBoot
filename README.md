@@ -1,9 +1,19 @@
 # Wacayoub MultiBoot
 
 Gestionnaire multiboot pour Enigma2, inspiré du « Multiboot Manager » d'Octagon (fonctions seulement, code écrit de zéro).
-Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.3.2_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
+Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.4.0_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
 
 Ouverture : Menu Plugins, menu Extensions, ou Menu > Système.
+
+## Nouveautés 1.4.0
+
+- Boutons de couleur redessinés : vrais boutons arrondis avec icône (Supprimer, Démarrer, Installer, Sauvegarder,
+  Menu) ; un bouton disparaît si l'action n'est pas possible sur le récepteur.
+- MENU : grille de 8 tuiles avec icônes (Restaurer, Sauvegarder, Installer, Sauvegardes, Espace disque, Actualiser,
+  Aide, Journal), navigation avec les flèches.
+- Bas de chaque liste : pastilles OK / EXIT / vert / jaune au lieu du texte.
+- Leçon : OpenATV exécute comme du code tout ce qui n'est pas une méthode dans onLayoutFinish/onShown ; un lambda y
+  fait échouer l'ouverture de l'écran. tests/check_screen_names.py le vérifie maintenant.
 
 ## Nouveautés 1.3.2
 
