@@ -1160,7 +1160,7 @@ class WMBMain(Base):
         items = []
         for d, its in catalog:
             if its:
-                sub = "%d images  ·  dernière : %s" % (len(its), its[0]["day"])
+                sub = "%d image%s  ·  dernière : %s" % (len(its), "s" if len(its) > 1 else "", its[0]["day"])
                 if core.distro_key(d) == "neutrino":
                     sub += "  ·  pas Enigma2 (menus et plugins différents)"
                 items.append(dict(icon="d_" + core.distro_key(d), title=d, value=(d, its), sub=sub))
