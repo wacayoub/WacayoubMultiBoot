@@ -759,6 +759,37 @@ def t_update_image():
     assert not leftovers("/media/wmbtest")
 
 
+def t_remote_job_status():
+    """A job run outside Enigma2 publishes its state; RemoteJob follows it to the end."""
+    import json, time
+    code = ("import sys,time,importlib.util
+"
+            "sp=importlib.util.spec_from_file_location('c', %r); c=importlib.util.module_from_spec(sp); sp.loader.exec_module(c)
+"
+            "j=c.Job('Test SSH')
+"
+            "j.start(lambda j:(j.say('etape 1',10),time.sleep(3),j.say('etape 2',60),time.sleep(3),'fini')[-1])
+"
+            "while not j.done: time.sleep(0.2)
+") % sys.argv[1]
+    p = subprocess.Popen([sys.executable, "-c", code])
+    time.sleep(1.5)
+    mine = [d for d in core.foreign_jobs() if d["pid"] == p.pid]
+    assert len(mine) == 1, mine
+    r = core.RemoteJob(mine[0])
+    assert not r.done and r.progress == 10 and r.title == "Test SSH", (r.progress, r.step)
+    time.sleep(3.5); r.refresh()
+    assert r.progress == 60 and r.step == "etape 2", (r.progress, r.step)
+    p.wait(); r.refresh()
+    assert r.done and r.ok and r.result == "fini", (r.done, r.result)
+    r.mark_seen()
+    assert not os.path.exists(r.path)
+    fake = core.JOB_STATUS % 999999
+    json.dump({"pid": 999999, "done": False, "title": "x"}, open(fake, "w"))
+    core.foreign_jobs()
+    assert not os.path.exists(fake), "stale status of a dead process must be removed"
+
+
 def t_no_temp_mounts_left():
     out = core.read_file("/proc/mounts")
     assert "wmb-mnt" not in out, out
@@ -770,7 +801,7 @@ TESTS = [t_detect_real, t_running_guards, t_install_backup_restore_delete, t_loc
          t_cancel_install, t_bad_urls, t_unknown_box, t_no_multiboot_no_slots, t_startup_layout,
          t_omb_classic_layout, t_catalog_parse, t_backups_settings_channels, t_custom_backup_restore,
          t_plugin_tools, t_backup_restore_plugin_choice, t_firstboot_script, t_find_update, t_update_image,
-         t_no_temp_mounts_left]
+         t_remote_job_status, t_no_temp_mounts_left]
 
 if __name__ == "__main__":
     flash_conf_before = None

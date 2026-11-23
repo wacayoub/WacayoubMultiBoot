@@ -1,9 +1,14 @@
 # Wacayoub MultiBoot
 
 Gestionnaire multiboot pour Enigma2, inspiré du « Multiboot Manager » d'Octagon (fonctions seulement, code écrit de zéro).
-Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.5.0_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
+Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.6.0_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
 
 Ouverture : Menu Plugins, menu Extensions, ou Menu > Système.
+
+## Nouveautés 1.6.0
+- **Progression à la télé pour tout** : une opération lancée hors de l'écran du plugin (par SSH, un script,
+  une autre application) s'affiche toute seule à la télé dans l'écran de progression (étape, barre, %).
+  EXIT la masque sans l'arrêter ; l'écran revient à la fin avec le résultat, même après un redémarrage de l'interface.
 
 ## Nouveautés 1.5.0
 - **Plugins au choix** : à la sauvegarde et à la restauration, une liste de tous les plugins installés

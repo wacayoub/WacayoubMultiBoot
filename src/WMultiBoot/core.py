@@ -23,7 +23,7 @@ import threading
 import time
 import zipfile
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 LOG_FILE = "/tmp/wmultiboot.log"
 DATA_DIR = "WMultiBoot"                     # <device>/WMultiBoot/{downloads,backups,tmp}
 CHROOT_BASES = ("OnlineMultiBoot/images", "open-multiboot", "ImageBoot", "WMultiBoot/images")
@@ -439,6 +439,90 @@ class TempMount(object):
 
 # --------------------------------------------------------------------------- job
 
+JOB_STATUS = "/tmp/wmb-job-%d.json"
+
+
+def _pid_alive(pid):
+    return os.path.isdir("/proc/%d" % pid)
+
+
+def foreign_jobs(max_age=900):
+    """Jobs of OTHER processes (SSH, scripts): running ones, and finished ones younger than
+    max_age seconds. Stale files of dead processes that never finished are removed."""
+    import glob
+    import json
+    me, now, out = os.getpid(), time.time(), []
+    for path in glob.glob(JOB_STATUS.replace("%d", "*")):
+        try:
+            with open(path) as f:
+                d = json.load(f)
+            pid = int(d.get("pid", 0))
+        except Exception:
+            continue
+        if pid == me:
+            continue
+        alive = _pid_alive(pid)
+        if not d.get("done") and not alive:
+            remove_quiet(path)
+            continue
+        if d.get("done") and now - float(d.get("ts", 0)) > max_age:
+            remove_quiet(path)
+            continue
+        d["path"] = path
+        out.append(d)
+    out.sort(key=lambda d: d.get("started", 0))
+    return out
+
+
+class RemoteJob(object):
+    """Read-only view of a job running in another process (same interface as Job for the
+    progress screen). EXIT only hides the screen: the job keeps running."""
+
+    remote = True
+
+    def __init__(self, data):
+        self.path = data["path"]
+        self.cancellable = False
+        self.cancelled = False
+        self.new_root = None
+        self._apply(data)
+
+    def _apply(self, d):
+        self.title = d.get("title") or "Opération en cours"
+        self.progress = int(d.get("progress") or 0)
+        self.step = d.get("step") or ""
+        self.lines = list(d.get("lines") or [])
+        self.done = bool(d.get("done"))
+        self.ok = bool(d.get("ok"))
+        self.result = d.get("result") or ""
+        self.pid = int(d.get("pid") or 0)
+        self.started = d.get("started", 0)
+
+    def refresh(self):
+        import json
+        try:
+            with open(self.path) as f:
+                self._apply(json.load(f))
+        except Exception:
+            if not self.done and not _pid_alive(self.pid):
+                # process gone without a final state (e.g. the GUI restart of a restore)
+                self.done, self.ok = True, True
+                self.result = self.result or "Opération terminée (le résultat complet est dans le journal)."
+        if not self.done and self.pid and not _pid_alive(self.pid):
+            self.done = True
+            self.result = self.result or "Le processus s'est arrêté. Voir le journal (MENU > Aide > Journal)."
+
+    def mark_seen(self):
+        if self.done:
+            remove_quiet(self.path)
+
+    def cancel(self):
+        pass
+
+    def check(self):
+        pass
+
+
 class Job(object):
     """State shared between a worker thread and the GUI (the GUI polls it)."""
 
@@ -464,9 +548,33 @@ class Job(object):
             if progress is not None:
                 self.progress = max(0, min(100, int(progress)))
         log("[%s] %s" % (self.title, msg))
+        self.publish()
 
     def set_progress(self, p):
         self.progress = max(0, min(100, int(p)))
+        self.publish()
+
+    def publish(self, force=False):
+        """Write the state to /tmp so a job started outside the GUI (SSH, script, another
+        process) can be followed on the TV. Throttled; never raises."""
+        import sys
+        if "enigma" in sys.modules:          # inside Enigma2 the GUI already shows its own jobs
+            return
+        now = time.time()
+        if not force and now - getattr(self, "_pub_ts", 0) < 1.0:
+            return
+        self._pub_ts = now
+        try:
+            import json
+            data = {"pid": os.getpid(), "title": self.title, "progress": self.progress, "step": self.step,
+                    "lines": self.lines[-12:], "done": self.done, "ok": self.ok, "result": self.result,
+                    "cancellable": False, "started": getattr(self, "_started", now), "ts": now}
+            path = JOB_STATUS % os.getpid()
+            with open(path + ".tmp", "w") as f:
+                json.dump(data, f)
+            os.rename(path + ".tmp", path)
+        except Exception:
+            pass
 
     def check(self):
         if self.cancelled:
@@ -495,6 +603,8 @@ class Job(object):
                 self.ok, self.result = False, "Erreur inattendue : %s" % e
             self.progress = 100 if self.ok else self.progress
             self.done = True
+            self.publish(force=True)
+        self._started = time.time()
         t = threading.Thread(target=runner, name="WMultiBootJob")
         t.daemon = True
         t.start()

@@ -543,7 +543,10 @@ class WMBProgress(Base):
         self["log"] = Label("")
         self["hint"] = Label("")
         self.init_footer()
-        self.footer_pairs = [("c_exit", "Annuler")]
+        self.remote = getattr(job, "remote", False)
+        self.footer_pairs = [("c_exit", "Masquer" if self.remote else "Annuler")]
+        if self.remote:
+            self["hint"].setText("Lancé hors de l'écran (SSH ou script). EXIT masque cet écran, l'opération continue.")
         self.onLayoutFinish.append(self.footer_init)
         self["actions"] = ActionMap(["OkCancelActions"], {"ok": self.prog_ok, "cancel": self.prog_cancel}, -1)
         self.timer = eTimer()
@@ -559,6 +562,8 @@ class WMBProgress(Base):
     @safe
     def poll(self):
         j = self.job
+        if self.remote:
+            j.refresh()
         self["step"].setText(j.step)
         self["bar"].setValue(j.progress)
         self["percent"].setText("%d %%" % j.progress)
@@ -584,7 +589,7 @@ class WMBProgress(Base):
             self.close(self.job)
 
     def prog_cancel(self):
-        if self.job.done:
+        if self.job.done or self.remote:
             self.close(self.job)
             return
         if not self.job.cancellable:
