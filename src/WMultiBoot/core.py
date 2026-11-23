@@ -23,7 +23,7 @@ import threading
 import time
 import zipfile
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 LOG_FILE = "/tmp/wmultiboot.log"
 DATA_DIR = "WMultiBoot"                     # <device>/WMultiBoot/{downloads,backups,tmp}
 CHROOT_BASES = ("OnlineMultiBoot/images", "open-multiboot", "ImageBoot", "WMultiBoot/images")

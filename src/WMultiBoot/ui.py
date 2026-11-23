@@ -1165,13 +1165,24 @@ class WMBMain(Base):
                     sub += "  ·  pas Enigma2 (menus et plugins différents)"
                 items.append(dict(icon="d_" + core.distro_key(d), title=d, value=(d, its), sub=sub))
             else:
-                items.append(dict(icon="d_" + core.distro_key(d), title=d, value=(d, its), pill="p_empty",
-                                  sub="Aucune image publiée pour %s" % self.mbl.box["machine"]))
+                sub = "Aucune image publiée pour %s" % self.mbl.box["machine"]
+                if core.distro_key(d) == "egami":
+                    sub = "Réservé aux donateurs pour ce récepteur  ·  OK : comment faire"
+                items.append(dict(icon="d_" + core.distro_key(d), title=d, value=(d, its), pill="p_empty", sub=sub))
         self.mb_pick("Images en ligne", items, self.pick_online, "Pour %s  ·  choisissez une distribution" % self.mbl.box["machine"])
 
     @safe
     def pick_online(self, value):
         distro, its = value
+        if not its and core.distro_key(distro) == "egami":
+            dirs = ", ".join(st["mount"] + "/images" for st in core.storages()[:2]) or "/media/hdd/images"
+            self.mb_info("EGAMI ne publie librement que certaines marques (Zgemma, Dreambox, HD51…).\n"
+                         "Pour les Vu+, les images sont réservées aux donateurs.\n\n"
+                         "1. Téléchargez le zip « _usb » ou « _multi » pour %s sur egami-image.com (compte donateur).\n"
+                         "2. Copiez-le dans %s.\n"
+                         "3. Touche JAUNE : il apparaît dans la liste et s'installe comme les autres."
+                         % (self.mbl.box["machine"], dirs))
+            return
         if not its:
             self.mb_info("%s ne publie pas d'image pour %s.\nChoisissez une autre distribution." % (distro, self.mbl.box["machine"]))
             return

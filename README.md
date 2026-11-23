@@ -1,9 +1,15 @@
 # Wacayoub MultiBoot
 
 Gestionnaire multiboot pour Enigma2, inspiré du « Multiboot Manager » d'Octagon (fonctions seulement, code écrit de zéro).
-Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.3.1_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
+Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.3.2_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
 
 Ouverture : Menu Plugins, menu Extensions, ou Menu > Système.
+
+## Nouveautés 1.3.2
+
+- EGAMI : leur liste publique ne contient que certaines marques (Zgemma, Dreambox, HD51, Novaler…). Pour les Vu+,
+  les images sont réservées aux donateurs (pages Vu+ sans lien sur image.egami-image.com). Le plugin l'explique et
+  indique la marche à suivre : télécharger le zip avec un compte donateur, le copier dans <disque>/images, touche JAUNE.
 
 ## Nouveautés 1.3.1
 
