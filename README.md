@@ -1,9 +1,27 @@
 # Wacayoub MultiBoot
 
 Gestionnaire multiboot pour Enigma2, inspiré du « Multiboot Manager » d'Octagon (fonctions seulement, code écrit de zéro).
-Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.4.0_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
+Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.5.0_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
 
 Ouverture : Menu Plugins, menu Extensions, ou Menu > Système.
+
+## Nouveautés 1.5.0
+- **Plugins au choix** : à la sauvegarde et à la restauration, une liste de tous les plugins installés
+  (type, version, taille) ; on coche exactement ceux à garder. Ceux déjà installés dans l'image cible sont décochés.
+- **Plugins hors feed** (vos plugins GitHub, Wacayoub Panel, BOP 2…) : recréés en `.ipk` depuis les fichiers
+  installés et rangés dans la sauvegarde (`wmb-ipk/`). Seuls les fichiers de plugin sont pris
+  (`usr/lib/enigma2`, `usr/share/enigma2`, polices, `etc/enigma2`, picons) : jamais de scripts de démarrage ni de binaires.
+- **Mettre à jour (tout garder)** (MENU ou OK sur une image) : trouve la dernière version stable de la même
+  distribution (pastille NOUVEAU / À JOUR), ou une autre image en ligne / un zip. Étapes : sauvegarde des éléments
+  choisis, installation dans un **nouveau** slot, restauration de tout dedans, copie de Wacayoub MultiBoot,
+  plugins programmés pour le premier démarrage. L'ancienne image n'est jamais modifiée ; ensuite
+  « Démarrer une fois pour tester » (conseillé) ou « définitivement ».
+- **Premier démarrage** : `/etc/rc3.d/S98wmbfirstboot` (avant Enigma2) installe les plugins depuis le feed, sinon
+  depuis le `.ipk` sauvegardé, avec des limites de temps, remet ensuite les réglages restaurés par-dessus ceux des
+  paquets, et s'efface. Un message résume le résultat au démarrage d'Enigma2.
+- Restaurer des plugins dans une autre image fonctionne maintenant (via ce même premier démarrage).
+- 28 tests sur la box (nouveaux : outils plugins, `.ipk` accepté par opkg, script du premier démarrage avec faux opkg,
+  recherche de mise à jour, mise à jour complète et annulation).
 
 ## Nouveautés 1.4.0
 

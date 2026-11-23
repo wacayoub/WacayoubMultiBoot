@@ -904,6 +904,9 @@ class WMBMain(Base):
         if lay.can("install") and (lay.new_slots or (s.installable and not s.running)):
             items.append(dict(icon="a_install", title="Installer une image…", value="install",
                               sub="Images en ligne, adresse internet ou fichier zip"))
+        if self.can_update(s):
+            items.append(dict(icon="a_update", title="Mettre à jour cette image (tout garder)", value="update",
+                              sub="Nouvelle version installée à côté, avec vos chaînes, réglages et plugins"))
         if lay.can("backup") and not s.empty and s.kind != "recovery":
             items.append(dict(icon="a_settings", title="Sauvegarder… (choisir quoi)", value="settings",
                               sub="Chaînes, satellites, réglages, plugins, softcam, réseau, picons"))
@@ -932,7 +935,7 @@ class WMBMain(Base):
         {"boot": lambda: self.boot(False), "once": lambda: self.boot(True), "install": self.key_yellow,
          "backup": lambda: self.backup_slot(s, False), "settings": lambda: self.backup_choose(s),
          "copy": lambda: self.copy_channels(s), "delete": self.key_red, "size": self.calc_size,
-         "restore": lambda: self.restore_start(s)}[what]()
+         "restore": lambda: self.restore_start(s), "update": lambda: self.update_start(s)}[what]()
 
     @safe
     def key_green(self):
@@ -1028,14 +1031,16 @@ class WMBMain(Base):
         lay = self.mbl
         if s is None or s.empty:
             raise MBError("Choisissez une image à sauvegarder.")
-        job = Job("Analyse du contenu de l'image").start(lambda j: core.backup_summary(s, lay))
+        job = Job("Analyse du contenu de l'image").start(
+            lambda j: (core.backup_summary(s, lay), core.plugin_report(s, lay)))
 
         def closed(j=None):
             if not job.ok:
                 return
+            summary, (details, feed) = job.result
             default = ("channels", "satellites", "settings", "plugins_conf", "plugins")
             items = []
-            for key, title, desc, warn, size, avail in job.result:
+            for key, title, desc, warn, size, avail in summary:
                 sub = desc
                 if size:
                     sub += "  ·  " + core.human_bytes(size)
@@ -1045,12 +1050,46 @@ class WMBMain(Base):
                     sub = "absent de cette image"
                 items.append(dict(key=key, title=title, sub=sub, checked=avail and key in default, enabled=avail))
 
-            def chosen(keys):
+            def save(keys, plugins=None):
                 self.with_target("Sauvegarde", lambda st: self.run_job(
-                    "Sauvegarde personnalisée", lambda jb: core.backup_custom(jb, s, keys, st["mount"], lay), rescan=False))
+                    "Sauvegarde personnalisée", lambda jb: core.backup_custom(jb, s, keys, st["mount"], lay, plugins),
+                    rescan=False))
+
+            def chosen(keys):
+                if "plugins" in keys and details:
+                    self.plugins_checklist("Quels plugins sauvegarder ?", "Image : %s  ·  %d plugins" % (s.title(), len(details)),
+                                           details, feed, None, lambda names: save(keys, names), "Sauvegarder")
+                else:
+                    save(keys)
             self.session.openWithCallback(lambda keys=None: keys and chosen(keys), WMBChecklist,
-                                          "Que sauvegarder ?", "Image : %s" % s.title(), items, "Sauvegarder")
+                                          "Que sauvegarder ?", "Image : %s" % s.title(), items, "Continuer")
         self.session.openWithCallback(closed, WMBProgress, job, True)
+
+    def plugins_checklist(self, title, subtitle, details, feed, have, cb, action="Valider", saved_ipk=None):
+        """One line per plugin. details: plugin_details() dicts (or names); have: names already
+        installed in the target (shown, unchecked); saved_ipk: names with a saved .ipk."""
+        items = []
+        for p in details:
+            if not isinstance(p, dict):
+                p = core.plugin_details_from_name(p)
+            notes = [p["kind"]]
+            if p.get("version"):
+                notes.append(p["version"][:24])
+            if p.get("size"):
+                notes.append(core.human_bytes(p["size"]))
+            if have is not None and p["name"] in have:
+                notes.append("déjà installé")
+            elif feed and p["name"] not in feed:
+                notes.append("hors feed : copié dans la sauvegarde")
+            elif saved_ipk is not None and p["name"] in saved_ipk:
+                notes.append("copie sauvegardée")
+            items.append(dict(key=p["name"], title=p["short"], sub="  ·  ".join(notes),
+                              checked=not (have is not None and p["name"] in have)))
+        if not items:
+            cb([])
+            return
+        self.session.openWithCallback(lambda names=None: names is not None and cb(names), WMBChecklist,
+                                      title, subtitle, items, action)
 
     # ===== SAUVEGARDER (touche bleue) : création uniquement
     @safe
@@ -1136,9 +1175,28 @@ class WMBMain(Base):
                 items.append(dict(key=key, title=title, checked=True, enabled=True,
                                   sub="%d %s  ·  %s" % (n, "plugins" if key == "plugins" else "fichiers", desc)))
 
+        def to_slot(keys, s):
+            if "plugins" not in keys or not info.get("plugins"):
+                self.restore_confirm(b, keys, s)
+                return
+            try:
+                have = set(core.installed_plugins("/" if s.running else s.root)) if (s.running or s.root) else set()
+            except Exception:
+                have = set()
+            if all(n in have for n in info["plugins"]):
+                rest = [k for k in keys if k != "plugins"]
+                if not rest:
+                    self.mb_error("Les %d plugins de cette sauvegarde sont déjà installés dans %s." % (len(info["plugins"]), s.title()))
+                    return
+                self.restore_confirm(b, rest, s)
+                return
+            self.plugins_checklist("Quels plugins restaurer ?", "Dans : %s  ·  %d plugins dans la sauvegarde" % (
+                s.title(), len(info["plugins"])), info["plugins"], None, have,
+                lambda names: self.restore_confirm(b, keys, s, names), "Continuer", set(info.get("ipks") or ()))
+
         def chosen(keys):
             if target is not None:
-                self.restore_confirm(b, keys, target)
+                to_slot(keys, target)
                 return
             targets = [s for s in self.mbl.slots if s.kind in ("chroot", "omb") and not s.empty]
             run = self.mbl.running_slot()
@@ -1150,17 +1208,23 @@ class WMBMain(Base):
                                  sub=("Image en cours : l'interface redémarre pour appliquer" if s.running
                                       else "Autre image : les fichiers sont écrits directement"),
                                  pill="p_running" if s.running else None))
-            self.mb_pick("Restaurer dans quelle image ?", pick, lambda s: self.restore_confirm(b, keys, s),
+            self.mb_pick("Restaurer dans quelle image ?", pick, lambda s: to_slot(keys, s),
                          "Éléments : %s" % ", ".join(core.CAT_TITLES[k] for k in keys))
         self.session.openWithCallback(lambda keys=None: keys and chosen(keys), WMBChecklist,
                                       "Que restaurer ?", "Sauvegarde de %s du %s" % (man.get("image", b["image"]), b["date"]),
                                       items, "Continuer")
 
     @safe
-    def restore_confirm(self, b, keys, s):
+    def restore_confirm(self, b, keys, s, plugins=None):
         if not s.running:
             core.guard_not_running(s)
+        if plugins is not None and not plugins:
+            keys = [k for k in keys if k != "plugins"]
+            if not keys:
+                raise MBError("Rien à restaurer : aucun élément ni plugin choisi.")
         what = ", ".join(core.CAT_TITLES[k] for k in keys)
+        if plugins:
+            what += " (%d plugins)" % len(plugins)
         text = "Restaurer dans « %s » :\n%s\n\n" % (s.title(), what)
         if s.running:
             text += "Une sauvegarde de sécurité des éléments actuels est faite d'abord.\nL'interface redémarrera ensuite."
@@ -1173,7 +1237,7 @@ class WMBMain(Base):
             def work(job):
                 if s.running:
                     st = core.storage_for(b["path"]) or (core.storages() or [None])[0]
-                    safe_keys = [k for k in keys if k != "picons"]
+                    safe_keys = [k for k in keys if k not in ("picons", "plugins")]
                     if st and safe_keys:
                         job.say("Sauvegarde de sécurité avant restauration…", 2)
                         try:
@@ -1183,7 +1247,7 @@ class WMBMain(Base):
                         except MBError as e:
                             log("pre-restore backup: %s" % e)
                         job.progress = 0
-                return core.restore_custom(job, b["path"], keys, s, lay)
+                return core.restore_custom(job, b["path"], keys, s, lay, plugins)
             self.run_job("Restauration", work, rescan=not s.running)
         self.mb_ask(text, go, default=True)
 
@@ -1297,7 +1361,7 @@ class WMBMain(Base):
         self.session.openWithCallback(closed, WMBProgress, job, True)
 
     @safe
-    def pick_distro(self, catalog):
+    def pick_distro(self, catalog, on_pick=None):
         items = []
         for d, its in catalog:
             if its:
@@ -1310,10 +1374,11 @@ class WMBMain(Base):
                 if core.distro_key(d) == "egami":
                     sub = "Réservé aux donateurs pour ce récepteur  ·  OK : comment faire"
                 items.append(dict(icon="d_" + core.distro_key(d), title=d, value=(d, its), pill="p_empty", sub=sub))
-        self.mb_pick("Images en ligne", items, self.pick_online, "Pour %s  ·  choisissez une distribution" % self.mbl.box["machine"])
+        self.mb_pick("Images en ligne", items, lambda v: self.pick_online(v, on_pick),
+                     "Pour %s  ·  choisissez une distribution" % self.mbl.box["machine"])
 
     @safe
-    def pick_online(self, value):
+    def pick_online(self, value, on_pick=None):
         distro, its = value
         if not its and core.distro_key(distro) == "egami":
             dirs = ", ".join(st["mount"] + "/images" for st in core.storages()[:2]) or "/media/hdd/images"
@@ -1332,7 +1397,7 @@ class WMBMain(Base):
             pill = "p_eol" if it["eol"] else ("p_beta" if (it["beta"] or "beta" in it["name"].lower()) else "p_release")
             items.append(dict(icon="d_" + core.distro_key(distro), title=it["name"].replace(".zip", ""), value=it,
                               pill=pill, sub="%s  ·  %s  ·  %s" % (it["day"], human_mb(it["size"] // core.MB), it["group"])))
-        self.mb_pick(distro, items, lambda it: self.install_from(it["url"], it["name"]), self.space_text())
+        self.mb_pick(distro, items, lambda it: (on_pick or self.install_from)(it["url"], it["name"]), self.space_text())
 
     @safe
     def install_from(self, image, label=None):
@@ -1401,6 +1466,158 @@ class WMBMain(Base):
                                          lambda j: offer_boot(), rescan=False),
                     default=True, no_cb=offer_boot)
 
+    # ===== METTRE À JOUR : nouvelle version à côté, tout gardé
+    def can_update(self, s):
+        lay = self.mbl
+        return bool(lay and s and lay.can("install") and lay.new_slots and not s.empty
+                    and s.kind != "recovery" and lay.key in ("chroot", "omb"))
+
+    @safe
+    def update_start(self, s=None):
+        if not self.ready():
+            return
+        s = s or self.current()
+        if not s or s.empty:
+            raise MBError("Choisissez d'abord l'image à mettre à jour.")
+        if not self.can_update(s):
+            raise MBError("La mise à jour « tout garder » demande un multiboot sur disque (HDD/USB).\n"
+                          "Sur ce récepteur : sauvegardez (BLEU), installez la nouvelle image (JAUNE), puis restaurez (MENU).")
+        if self._catalog and time.time() - self._catalog[0] < 900:
+            self.update_pick_source(s, self._catalog[1])
+            return
+        machine = self.mbl.box["machine"]
+        job = Job("Recherche des mises à jour").start(lambda j: core.fetch_catalog(j, machine))
+
+        def closed(j=None):
+            if job.ok:
+                self._catalog = (time.time(), job.result)
+                self.update_pick_source(s, job.result)
+        self.session.openWithCallback(closed, WMBProgress, job, True)
+
+    @safe
+    def update_pick_source(self, s, catalog):
+        info = s.info or {}
+        item, newer = core.find_update(catalog, s)
+        items = []
+        if item:
+            items.append(dict(icon="d_" + core.distro_key(info.get("distro", "")), value=("image", item),
+                              title="Dernière %s : %s" % (info.get("distro", ""), item["name"].replace(".zip", "")),
+                              pill="p_new" if newer else "p_uptodate",
+                              sub="%s  ·  %s  ·  %s" % (item["day"], human_mb(item["size"] // core.MB),
+                                                       "plus récente que votre image" if newer else "pas plus récente que votre image")))
+        items.append(dict(icon="a_online", title="Choisir une autre image en ligne…", value=("other", None),
+                          sub="Autre version ou autre distribution"))
+        for label, path, size in core.find_local_images()[:20]:
+            items.append(dict(icon="a_file", title=os.path.basename(path), value=("file", path),
+                              sub="%s  ·  %s" % (human_mb(size), os.path.dirname(path))))
+        sub = "Vos chaînes, réglages et plugins sont gardés  ·  l'ancienne image reste disponible"
+        if not item:
+            sub = "Pas de version en ligne trouvée pour %s  ·  choisissez une image" % (info.get("distro") or "cette image")
+
+        def chosen(v):
+            kind, val = v
+            if kind == "image":
+                self.update_options(s, val["url"], val["name"])
+            elif kind == "file":
+                self.update_options(s, val, os.path.basename(val))
+            else:
+                self.pick_distro(catalog, lambda url, name: self.update_options(s, url, name))
+        self.mb_pick("Mettre à jour « %s »" % s.title(), items, chosen, sub)
+
+    @safe
+    def update_options(self, s, image, label):
+        lay = self.mbl
+        same = core.distro_key(label) == core.distro_key((s.info or {}).get("distro", ""))
+        job = Job("Analyse de l'image actuelle").start(
+            lambda j: (core.backup_summary(s, lay), core.plugin_report(s, lay)))
+
+        def closed(j=None):
+            if not job.ok:
+                return
+            summary, (details, feed) = job.result
+            risky = ("settings", "plugins_conf", "plugins")
+            items = []
+            for key, title, desc, warn, size, avail in summary:
+                sub = desc + ("  ·  " + core.human_bytes(size) if size else "")
+                if not same and key in risky:
+                    sub += "  ·  autre distribution : déconseillé"
+                if not avail:
+                    sub = "absent de cette image"
+                items.append(dict(key=key, title=title, sub=sub, enabled=avail,
+                                  checked=avail and (same or key not in risky)))
+            subtitle = "De %s vers %s" % (s.title(), label.replace(".zip", ""))
+            if not same:
+                subtitle += "  ·  autre distribution"
+
+            def chosen(keys):
+                if "plugins" in keys and details:
+                    self.plugins_checklist("Quels plugins garder ?", "%d plugins dans %s" % (len(details), s.title()),
+                                           details, feed, None, lambda names: self.update_where(s, image, label, keys, names),
+                                           "Continuer")
+                else:
+                    self.update_where(s, image, label, keys, None)
+            self.session.openWithCallback(lambda keys=None: keys and chosen(keys), WMBChecklist,
+                                          "Que garder ?", subtitle, items, "Continuer")
+        self.session.openWithCallback(closed, WMBProgress, job, True)
+
+    @safe
+    def update_where(self, s, image, label, keys, plugins):
+        if plugins is not None and not plugins:
+            keys = [k for k in keys if k != "plugins"]
+        if not keys:
+            raise MBError("Cochez au moins un élément à garder.")
+        targets = [t for t in self.mbl.install_targets() if t["free"] >= 900]
+        if not targets:
+            raise MBError("Pas assez de place : il faut environ 900 Mo libres (image + sauvegarde).\n"
+                          "Supprimez une ancienne image ou sauvegarde.")
+        if len(targets) == 1:
+            self.update_confirm(s, image, label, keys, plugins, targets[0])
+            return
+        self.mb_pick("Où installer la nouvelle version ?", [
+            dict(icon="a_disk", title=t["mount"], value=t, sub="%s libres sur %s" % (human_mb(t["free"]), human_mb(t["total"])))
+            for t in targets], lambda t: self.update_confirm(s, image, label, keys, plugins, t), "Choisissez le disque")
+
+    @safe
+    def update_confirm(self, s, image, label, keys, plugins, target):
+        lay = self.mbl
+        what = ", ".join(core.CAT_TITLES[k] for k in keys)
+        if plugins:
+            what += " (%d plugins)" % len(plugins)
+        text = ("Mettre à jour « %s » avec\n%s ?\n\n"
+                "1. Sauvegarde de : %s\n"
+                "2. Installation de la nouvelle version dans un nouveau slot (%s)\n"
+                "3. Restauration de tout dans la nouvelle version\n"
+                "4. Plugins installés au premier démarrage (Internet nécessaire)\n\n"
+                "L'image actuelle n'est pas modifiée. EXIT pour annuler pendant le téléchargement."
+                % (s.title(), label.replace(".zip", ""), what, target["mount"]))
+        self.mb_ask(text, lambda: self.run_job(
+            "Mise à jour d'image", lambda job: core.update_image(job, lay, s, image, target, keys, plugins, target["mount"]),
+            self.after_update), default=True)
+
+    def after_update(self, job):
+        root = getattr(job, "new_root", None)
+        new = None
+        for x in self.mbl.slots:
+            if root and x.root == root:
+                new = x
+        if new is None:
+            self.mb_info(job.result)
+            return
+        self["list"].moveToIndex(self.mbl.slots.index(new))
+        self.update_details()
+        items = []
+        if self.mbl.can("once"):
+            items.append(dict(icon="a_once", title="Démarrer une fois pour tester (conseillé)", value="once",
+                              sub="Au redémarrage suivant, retour sur l'ancienne image"))
+        items.append(dict(icon="a_boot", title="Démarrer définitivement sur la nouvelle version", value="boot",
+                          sub="L'ancienne image reste dans la liste"))
+        items.append(dict(icon="a_help", title="Plus tard", value="later", sub="Touche VERTE quand vous voulez"))
+
+        def go(v):
+            if v in ("once", "boot"):
+                self.run_job("Choix du démarrage", lambda j: self.mbl.set_next(j, new, v == "once"), self.ask_reboot)
+        self.mb_pick("Nouvelle version prête", items, go, (new.info or {}).get("label", new.title()))
+
     @safe
     def calc_size(self):
         s = self.current()
@@ -1416,16 +1633,16 @@ class WMBMain(Base):
     # ---- menu
     @safe
     def key_menu(self):
-        tiles = [("restore", "m_restore", "Restaurer", "une sauvegarde"),
+        tiles = [("update", "m_update", "Mettre à jour", "tout garder"),
+                 ("restore", "m_restore", "Restaurer", "une sauvegarde"),
                  ("backups", "m_backup", "Sauvegarder", "choisir quoi"),
                  ("install", "m_install", "Installer", "en ligne · URL · zip"),
                  ("manage", "m_manage", "Sauvegardes", "voir · supprimer"),
                  ("space", "m_space", "Espace disque", self.space_short()),
                  ("rescan", "m_refresh", "Actualiser", "relire les images"),
-                 ("help", "m_help", "Aide", "touches · compatibilité"),
-                 ("log", "m_log", "Journal", "dernières actions")]
+                 ("help", "m_help", "Aide", "aide · journal")]
         if self.mbl is not None and not self.mbl.can("install"):
-            tiles = [t for t in tiles if t[0] != "install"]
+            tiles = [t for t in tiles if t[0] not in ("install", "update")]
         self.session.openWithCallback(lambda v=None: v and self.menu_action(v), WMBMenu, tiles,
                                       "Wacayoub MultiBoot %s" % core.VERSION,
                                       "%s %s  ·  %s" % (self.mbl.box["brand"], self.mbl.box["machine"], self.mbl.name)
@@ -1476,7 +1693,14 @@ class WMBMain(Base):
         elif what == "log":
             self.mb_info(core.read_file(core.LOG_FILE)[-2500:] or "Journal vide.")
         elif what == "help":
+            self.mb_pick("Aide", [dict(icon="a_help", title="Aide et compatibilité", value="help_text",
+                                       sub="Touches, récepteurs pris en charge, sécurité"),
+                                  dict(icon="a_size", title="Journal", value="log", sub=core.LOG_FILE)],
+                         self.menu_action, "Wacayoub MultiBoot %s" % core.VERSION)
+        elif what == "help_text":
             self.mb_info(HELP)
+        elif what == "update":
+            self.update_start()
         elif what == "list":
             self.key_menu_list()
 
@@ -1484,7 +1708,9 @@ class WMBMain(Base):
 HELP = """Wacayoub MultiBoot %s
 
 VERT : démarrer sur l'image choisie.  OK : toutes les options (démarrer une seule fois, copier les chaînes…).
-JAUNE : installer une image.  BLEU : sauvegarder.  MENU : restaurer une sauvegarde, gérer les sauvegardes.  ROUGE : supprimer.
+JAUNE : installer une image.  BLEU : sauvegarder.  MENU : mettre à jour, restaurer, gérer les sauvegardes.  ROUGE : supprimer.
+
+Mettre à jour (tout garder) : la nouvelle version est installée à côté de l'ancienne, vos chaînes, réglages, softcam, réseau, picons et plugins choisis y sont remis. Les plugins sont installés à son premier démarrage (Internet nécessaire) ; vos plugins hors feed sont copiés dans la sauvegarde. L'ancienne image reste dans la liste.
 
 Structures reconnues automatiquement :
 • HDD/USB (omb-init) : Vu+ 4K et autres.

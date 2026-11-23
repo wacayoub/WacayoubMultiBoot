@@ -548,6 +548,217 @@ def t_custom_backup_restore():
     lay.delete(FakeJob("d"), slot)
 
 
+def plugin_rootfs(version="9.9.9", date="20261122"):
+    """Rootfs of a small fake image with two plugins: one in the feed, one only installed."""
+    status = ("Package: enigma2-plugin-extensions-infeed\nVersion: 1.0\nStatus: install ok installed\nInstalled-Size: 100\n\n"
+              "Package: enigma2-plugin-extensions-mine\nVersion: 2.1\nStatus: install ok installed\nInstalled-Size: 2000\n\n"
+              "Package: enigma2-plugin-settings-vhannibal\nVersion: 1\nStatus: install ok installed\n\n"
+              "Package: enigma2-plugin-extensions-wmultiboot\nVersion: 1\nStatus: install ok installed\n\n")
+    extra = {
+        "./etc/inittab": b"id:3:initdefault:\nl3:3:wait:/etc/init.d/rc 3\n",
+        "./etc/rc3.d/S01networking": b"#!/bin/sh\n",
+        "./etc/rcS.d/S01x": b"#!/bin/sh\n",
+        "./usr/lib/enigma2/python/Plugins/Extensions/.keep": b"",
+        "./var/lib/opkg/status": status.encode(),
+        "./var/lib/opkg/lists/openatv-all": b"Package: enigma2-plugin-extensions-infeed\nVersion: 1.0\n\n",
+        "./var/lib/opkg/info/enigma2-plugin-extensions-mine.control":
+            b"Package: enigma2-plugin-extensions-mine\nVersion: 2.1\nArchitecture: all\nMaintainer: me\nDescription: mine\n"
+            b"Status: install ok installed\nInstalled-Time: 1\n",
+        "./var/lib/opkg/info/enigma2-plugin-extensions-mine.list":
+            b"/usr/lib/enigma2/python/Plugins/Extensions/Mine/plugin.py\n/usr/lib/enigma2/python/Plugins/Extensions/Mine/plugin.pyc\n"
+            b"/etc/init.d/mine-evil\n/usr/bin/mine-bin\n",
+        "./usr/lib/enigma2/python/Plugins/Extensions/Mine/plugin.py": b"# mine\n",
+        "./usr/lib/enigma2/python/Plugins/Extensions/Mine/plugin.pyc": b"pyc",
+        "./etc/init.d/mine-evil": b"#!/bin/sh\n",
+        "./usr/bin/mine-bin": b"bin",
+        "./etc/enigma2/lamedb": b"eDVB services /4/\nend\n",
+        "./etc/enigma2/bouquets.tv": b"#NAME Bouquets (TV)\n",
+        "./etc/enigma2/settings": b"config.misc.firstrun=false\n",
+        "./etc/image-version": ("box_type=vuzero4k\ndistro=openatv\nimageversion=%s\ndate=%s\n" % (version, date)).encode(),
+    }
+    return make_rootfs(extra=extra)
+
+
+def read_ipk(path):
+    """{member: bytes} of an ar archive."""
+    data = open(path, "rb").read()
+    assert data.startswith(b"!<arch>\n"), data[:8]
+    i, out = 8, {}
+    while i < len(data):
+        name = data[i:i + 16].decode().strip().rstrip("/")
+        size = int(data[i + 48:i + 58].decode().strip())
+        out[name] = data[i + 60:i + 60 + size]
+        i += 60 + size + (size % 2)
+    return out
+
+
+def t_plugin_tools():
+    det = core.plugin_details("/")
+    names = [p["name"] for p in det]
+    assert names and core.SELF_PKG not in names and not [n for n in names if "-settings-" in n], names
+    assert all(p["kind"] and p["short"] for p in det)
+    assert core.plugin_details_from_name("enigma2-plugin-softcams-oscam")["kind"] == "Softcam"
+    feed = core.feed_packages("/")
+    assert feed, "no opkg lists on the box"
+    # a real plugin of the box that is not in the feed is re-packed as a valid .ipk
+    own = [n for n in names if n not in feed and n.endswith(("wacayoubpanel", "bop2", "iptvbouquetai"))]
+    assert own, "expected own plugins outside the feed"
+    out = "/media/wmbtest/test.ipk"
+    n = core.repack_ipk("/", own[0], out)
+    assert n > 0, own[0]
+    parts = read_ipk(out)
+    assert set(parts) == {"debian-binary", "control.tar.gz", "data.tar.gz"}, parts.keys()
+    with tarfile.open(fileobj=io.BytesIO(parts["data.tar.gz"])) as t:
+        files = [m.name for m in t if m.isfile()]
+    assert files and all(core.REPACK_OK.match(f[2:]) for f in files), files[:5]
+    assert not [f for f in files if f.endswith(".pyc")]
+    with tarfile.open(fileobj=io.BytesIO(parts["control.tar.gz"])) as t:
+        ctl = t.extractfile("./control").read().decode()
+    assert "Package: %s" % own[0] in ctl and "Status:" not in ctl, ctl
+    # opkg accepts it: install into an offline test root (nothing touches the running image)
+    off = "/media/wmbtest/offroot"
+    os.makedirs(off + "/var/lib/opkg", exist_ok=True)
+    rc = subprocess.call(["opkg", "-o", off, "--force-depends", "--nodeps", "install", out],
+                         stdout=open("/media/wmbtest/opkg.out", "w"), stderr=subprocess.STDOUT)
+    log_ = core.read_file("/media/wmbtest/opkg.out")
+    assert rc == 0 and os.path.isdir(off + "/usr/lib/enigma2/python/Plugins"), log_[-400:]
+    shutil.rmtree(off, ignore_errors=True)
+    os.remove(out)
+
+
+def t_backup_restore_plugin_choice():
+    z = make_zip("/media/wmbtest/plug.zip", rootfs=plugin_rootfs())
+    lay = chroot_layout()
+    job = FakeJob("i")
+    lay.install(job, z, target=target("/media/wmbtest"))
+    lay = chroot_layout()
+    src = [s for s in lay.slots if s.root == job.new_root][0]
+    det, feed = core.plugin_report(src, lay)
+    assert [p["name"] for p in det] == ["enigma2-plugin-extensions-infeed", "enigma2-plugin-extensions-mine"], det
+    assert feed == {"enigma2-plugin-extensions-infeed"}, feed
+    # back up only the chosen plugins
+    jb = FakeJob("b")
+    core.backup_custom(jb, src, ["channels", "plugins"], "/media/wmbtest", lay,
+                       ["enigma2-plugin-extensions-mine", "enigma2-plugin-extensions-infeed", "not-installed"])
+    info = core.read_backup(jb.last_backup)
+    assert info["plugins"] == ["enigma2-plugin-extensions-infeed", "enigma2-plugin-extensions-mine"], info
+    assert info["ipks"] == ["enigma2-plugin-extensions-mine"], info      # only the one outside the feed
+    jb2 = FakeJob("b2")
+    core.backup_custom(jb2, src, ["plugins"], "/media/wmbtest", lay, ["enigma2-plugin-extensions-infeed"])
+    assert core.read_backup(jb2.last_backup)["plugins"] == ["enigma2-plugin-extensions-infeed"]
+    # restore into a second (not running) image with only one plugin chosen
+    z2 = make_zip("/media/wmbtest/plug2.zip", rootfs=make_rootfs(extra={
+        "./etc/inittab": b"id:3:initdefault:\n", "./etc/rc3.d/S01networking": b"#!/bin/sh\n"}))
+    j2 = FakeJob("i2")
+    lay.install(j2, z2, target=target("/media/wmbtest"))
+    lay = chroot_layout()
+    dst = [s for s in lay.slots if s.root == j2.new_root][0]
+    msg = core.restore_custom(FakeJob("r"), jb.last_backup, ["channels", "plugins"], dst, lay,
+                              ["enigma2-plugin-extensions-mine"])
+    fb = os.path.join(dst.root, core.FIRSTBOOT_DIR)
+    assert core.read_file(fb + "/plugins.txt").split() == ["enigma2-plugin-extensions-mine"], msg
+    assert os.path.isfile(fb + "/ipk/enigma2-plugin-extensions-mine.ipk")
+    hook = os.path.join(dst.root, "etc/rc3.d/S98wmbfirstboot")
+    assert os.access(hook, os.X_OK) and subprocess.call(["sh", "-n", hook]) == 0
+    assert os.path.isfile(os.path.join(dst.root, "etc/enigma2/lamedb"))
+    assert "premier démarrage" in msg, msg
+    # never on the running image
+    expect_error(lambda: core.install_firstboot_hook("/", ["x"]), "en cours")
+    for s in (src, dst):
+        lay.delete(FakeJob("d"), s)
+    for b in core.list_backups():
+        if b["mount"] == "/media/wmbtest":
+            core.delete_backup(b["path"])
+    assert not leftovers("/media/wmbtest")
+
+
+def t_firstboot_script():
+    """Run the real first-boot script in a sandbox with a fake opkg (no change to the box)."""
+    sb = "/media/wmbtest/fb"
+    shutil.rmtree(sb, ignore_errors=True)
+    os.makedirs(sb + "/bin")
+    os.makedirs(sb + "/root/etc/enigma2")
+    os.makedirs(sb + "/root/etc/wmb-firstboot/ipk")
+    core.write_file(sb + "/root/etc/enigma2/settings", "mine\n")
+    core.write_file(sb + "/bin/opkg", "#!/bin/sh\necho \"$@\" >> %s/calls\n"
+                    "case \"$1\" in update) exit 0;; status) [ \"$2\" = have-it ] && echo 'Status: install ok installed'; exit 0;;\n"
+                    " install) case \"$2\" in *good*) echo overwrite > %s/root/etc/enigma2/settings; exit 0;; *.ipk) exit 0;; esac; exit 1;; esac\n"
+                    % (sb, sb))
+    os.chmod(sb + "/bin/opkg", 0o755)
+    core.write_file(sb + "/root/etc/wmb-firstboot/plugins.txt", "good-one\nhave-it\nlocal-one\nmissing-one\nbad;name\n")
+    core.write_file(sb + "/root/etc/wmb-firstboot/ipk/local-one.ipk", "x")
+    script = core.FIRSTBOOT_SCRIPT % {"dir": sb[1:] + "/root/etc/wmb-firstboot", "hook": sb[1:] + "/hook", "root": sb + "/root"}
+    core.write_file(sb + "/hook", script)
+    env = dict(os.environ, PATH=sb + "/bin:" + os.environ.get("PATH", ""))
+    rc = subprocess.call(["sh", sb + "/hook"], env=env, timeout=120)
+    res = core.parse_kv(core.read_file(sb + "/root/etc/wmb-firstboot/result.txt"))
+    calls = core.read_file(sb + "/calls")
+    assert rc == 0 and not os.path.exists(sb + "/hook"), "hook must remove itself"
+    assert res.get("installed") == "2" and res.get("failed", "").split() == ["missing-one"] and res.get("network") == "1", res
+    assert "install have-it" not in calls and "bad;name" not in calls, calls
+    assert core.read_file(sb + "/root/etc/enigma2/settings") == "mine\n", "restored settings must win over the package"
+    assert not os.path.exists(sb + "/root/etc/wmb-firstboot/plugins.txt")
+    # the notice is shown once
+    text = core.firstboot_result(sb + "/root")
+    assert "2 plugins" in text and "missing-one" in text, text
+    assert core.firstboot_result(sb + "/root") is None
+    shutil.rmtree(sb, ignore_errors=True)
+
+
+def t_find_update():
+    slot = core.Slot("x", 1, "chroot", info={"distro": "OpenATV", "date": "20261002", "label": "OpenATV 8.0.1"})
+    cat = [("OpenATV", [
+        {"name": "openatv-8.0.2-vuzero4k-20261120_usb.zip", "eol": False, "beta": False, "date": 0, "url": "u1"},
+        {"name": "openatv-8.1-beta-vuzero4k-20261122_usb.zip", "eol": False, "beta": True, "date": 0, "url": "u2"},
+        {"name": "openatv-7.6-vuzero4k-20261121_usb.zip", "eol": True, "beta": False, "date": 0, "url": "u3"}]),
+           ("OpenPLi", [{"name": "openpli-9.2-vuzero4k-20261130.zip", "eol": False, "beta": False, "date": 0, "url": "u4"}])]
+    it, newer = core.find_update(cat, slot)
+    assert it["url"] == "u1" and newer, it
+    slot.info["date"] = "20261125"
+    it, newer = core.find_update(cat, slot)
+    assert it["url"] == "u1" and not newer
+    slot.info["distro"] = "Bidule"
+    assert core.find_update(cat, slot) == (None, False)
+
+
+def t_update_image():
+    lay = chroot_layout()
+    j0 = FakeJob("i")
+    lay.install(j0, make_zip("/media/wmbtest/old.zip", rootfs=plugin_rootfs("8.0.1", "20261002")), target=target("/media/wmbtest"))
+    lay = chroot_layout()
+    old = [s for s in lay.slots if s.root == j0.new_root][0]
+    before = core.read_file(os.path.join(old.root, "etc/enigma2/settings"))
+    newzip = make_zip("/media/wmbtest/new.zip", rootfs=make_rootfs(extra={
+        "./etc/inittab": b"id:3:initdefault:\n", "./etc/rc3.d/S01networking": b"#!/bin/sh\n",
+        "./usr/lib/enigma2/python/Plugins/Extensions/.keep": b"",
+        "./etc/enigma2/settings": b"config.misc.firstrun=true\n"}))
+    job = FakeJob("u")
+    msg = core.update_image(job, lay, old, newzip, target("/media/wmbtest"), ["channels", "settings", "plugins"], None,
+                            "/media/wmbtest")
+    new = job.new_root
+    assert new and new != old.root and os.path.isdir(new), msg
+    assert core.read_file(os.path.join(new, "etc/enigma2/settings")) == "config.misc.firstrun=false\n", "settings kept"
+    assert os.path.isfile(os.path.join(new, "etc/enigma2/lamedb"))
+    assert sorted(core.read_file(os.path.join(new, core.FIRSTBOOT_DIR, "plugins.txt")).split()) == [
+        "enigma2-plugin-extensions-infeed", "enigma2-plugin-extensions-mine"]
+    assert os.path.isfile(os.path.join(new, core.FIRSTBOOT_DIR, "ipk/enigma2-plugin-extensions-mine.ipk"))
+    me = os.path.join(new, "usr/lib/enigma2/python/Plugins/Extensions/WMultiBoot")
+    assert os.path.isfile(me + "/core.py") and not [f for f in os.listdir(me) if f.endswith(".pyc")]
+    assert core.read_file(os.path.join(old.root, "etc/enigma2/settings")) == before, "old image untouched"
+    assert "gardée" in msg, msg
+    # cancel during the backup step: nothing installed, nothing left
+    jc = FakeJob("c"); jc.cancelled = True
+    expect_error(lambda: core.update_image(jc, chroot_layout(), old, newzip, target("/media/wmbtest"), ["channels"], None,
+                                           "/media/wmbtest"), "annul")
+    lay = chroot_layout()
+    for s in [s for s in lay.slots if s.root and s.root.startswith("/media/wmbtest/")]:
+        lay.delete(FakeJob("d"), s)
+    for b in core.list_backups():
+        if b["mount"] == "/media/wmbtest":
+            core.delete_backup(b["path"])
+    assert not leftovers("/media/wmbtest")
+
+
 def t_no_temp_mounts_left():
     out = core.read_file("/proc/mounts")
     assert "wmb-mnt" not in out, out
@@ -557,7 +768,9 @@ TESTS = [t_detect_real, t_running_guards, t_install_backup_restore_delete, t_loc
          t_corrupt_zip, t_truncated_zip, t_crc_damaged_zip, t_corrupt_rootfs_in_zip, t_zip_without_rootfs,
          t_wrong_box_zip, t_full_disk_precheck, t_full_disk_during_extract, t_backup_full_disk,
          t_cancel_install, t_bad_urls, t_unknown_box, t_no_multiboot_no_slots, t_startup_layout,
-         t_omb_classic_layout, t_catalog_parse, t_backups_settings_channels, t_custom_backup_restore, t_no_temp_mounts_left]
+         t_omb_classic_layout, t_catalog_parse, t_backups_settings_channels, t_custom_backup_restore,
+         t_plugin_tools, t_backup_restore_plugin_choice, t_firstboot_script, t_find_update, t_update_image,
+         t_no_temp_mounts_left]
 
 if __name__ == "__main__":
     flash_conf_before = None

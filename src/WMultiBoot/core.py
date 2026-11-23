@@ -23,7 +23,7 @@ import threading
 import time
 import zipfile
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 LOG_FILE = "/tmp/wmultiboot.log"
 DATA_DIR = "WMultiBoot"                     # <device>/WMultiBoot/{downloads,backups,tmp}
 CHROOT_BASES = ("OnlineMultiBoot/images", "open-multiboot", "ImageBoot", "WMultiBoot/images")
@@ -1976,7 +1976,7 @@ def classify(rel):
     rel = rel.rstrip("/")
     if not rel or ".." in rel.split("/") or rel.startswith("/") or FORBIDDEN.match(rel):
         return None
-    if rel in (MANIFEST, PLUGIN_LIST):
+    if rel in (MANIFEST, PLUGIN_LIST) or (rel.startswith(IPK_DIR + "/") and rel.count("/") == 1 and rel.endswith(".ipk")):
         return "meta"
     if rel.startswith(E2):
         name = rel[len(E2):]
@@ -2052,21 +2052,157 @@ def _tree_size(path):
     return total
 
 
-def installed_plugins(root):
-    """enigma2 plugin/skin/softcam package names installed in an image (from opkg status)."""
-    names = []
+SELF_PKG = "enigma2-plugin-extensions-wmultiboot"
+PLUGIN_KINDS = (("extensions", "Extension"), ("systemplugins", "Système"), ("skins", "Skin"),
+                ("skincomponents", "Skin"), ("softcams", "Softcam"), ("picons", "Picons"),
+                ("drivers", "Pilote"), ("font", "Police"))
+IPK_DIR = "wmb-ipk"
+# files a re-packed plugin may contain (never boot scripts, binaries or system libraries)
+REPACK_OK = re.compile(r"^(usr/lib/enigma2/|usr/share/enigma2/|usr/share/fonts/|etc/enigma2/|picon/|"
+                       r"usr/lib/python[\d.]+/site-packages/)")
+
+
+def _opkg_status(root):
     for st in ("var/lib/opkg/status", "usr/lib/opkg/status"):
         text = read_file(os.path.join(root, st))
         if text:
-            for block in text.split("\n\n"):
-                m = re.search(r"^Package:\s*(\S+)", block, re.M)
-                if m and re.search(r"^Status:.*\binstalled\b", block, re.M):
-                    n = m.group(1)
-                    if n.startswith(("enigma2-plugin-extensions-", "enigma2-plugin-systemplugins-",
-                                     "enigma2-plugin-skins-", "enigma2-plugin-softcams-", "enigma2-plugin-picons-")):
-                        names.append(n)
+            return text
+    return ""
+
+
+def plugin_details(root):
+    """[{name, short, kind, version, size, auto}] of the Enigma2 plugins installed in an image.
+    Channel-list packages (enigma2-plugin-settings-*) and this plugin are left out."""
+    out = []
+    for block in _opkg_status(root).split("\n\n"):
+        m = re.search(r"^Package:\s*(\S+)", block, re.M)
+        if not m or not re.search(r"^Status:.*\binstalled\b", block, re.M):
+            continue
+        n = m.group(1)
+        if not n.startswith("enigma2-plugin-") or n.startswith("enigma2-plugin-settings-") or n == SELF_PKG:
+            continue
+        rest = n[len("enigma2-plugin-"):]
+        kind, short = "Plugin", rest
+        for k, label in PLUGIN_KINDS:
+            if rest.startswith(k + "-"):
+                kind, short = label, rest[len(k) + 1:]
+                break
+        v = re.search(r"^Version:\s*(\S+)", block, re.M)
+        sz = re.search(r"^Installed-Size:\s*(\d+)", block, re.M)
+        out.append({"name": n, "short": short, "kind": kind, "version": v.group(1) if v else "",
+                    "size": int(sz.group(1)) if sz else 0,
+                    "auto": bool(re.search(r"^Auto-Installed:\s*yes", block, re.M))})
+    out.sort(key=lambda p: (p["kind"] != "Extension", p["kind"], p["short"]))
+    return out
+
+
+def plugin_report(slot, layout=None):
+    """(plugin details, feed package names) of a slot, for the plugin checklists."""
+    with _slot_root_ctx(slot, layout) as root:
+        return plugin_details(root), feed_packages(root)
+
+
+def plugin_details_from_name(n):
+    """Same dict as plugin_details() for a bare package name (from a backup list)."""
+    rest = n[len("enigma2-plugin-"):] if n.startswith("enigma2-plugin-") else n
+    kind, short = "Plugin", rest
+    for k, label in PLUGIN_KINDS:
+        if rest.startswith(k + "-"):
+            kind, short = label, rest[len(k) + 1:]
             break
-    return sorted(set(names))
+    return {"name": n, "short": short, "kind": kind, "version": "", "size": 0, "auto": False}
+
+
+def installed_plugins(root):
+    """Package names of the Enigma2 plugins installed in an image (from opkg status)."""
+    return sorted(set(p["name"] for p in plugin_details(root)))
+
+
+def feed_packages(root):
+    """Package names known by the image's opkg feed lists (empty set when never updated)."""
+    names = set()
+    for d in ("var/lib/opkg/lists", "var/lib/opkg"):
+        base = os.path.join(root, d)
+        try:
+            files = os.listdir(base)
+        except Exception:
+            continue
+        for f in files:
+            p = os.path.join(base, f)
+            if f in ("status", "info") or not os.path.isfile(p):
+                continue
+            try:
+                with open(p, "rb") as fh:
+                    head = fh.read(2)
+                    fh.seek(0)
+                    if head == b"\x1f\x8b":
+                        import gzip
+                        data = gzip.GzipFile(fileobj=fh).read()
+                    else:
+                        data = fh.read()
+                names.update(re.findall(r"^Package:\s*(\S+)", data.decode("utf-8", "ignore"), re.M))
+            except Exception:
+                pass
+        if names:
+            break
+    return names
+
+
+def _ar_member(name, data):
+    hdr = "%-16s%-12d%-6d%-6d%-8s%-10d`\n" % (name, int(time.time()), 0, 0, "100644", len(data))
+    return hdr.encode("ascii") + data + (b"\n" if len(data) % 2 else b"")
+
+
+def repack_ipk(root, name, out_path, max_bytes=60 * MB):
+    """Rebuild an installable .ipk of a plugin from its installed files (for plugins that
+    are not in any feed). Only plugin files are taken, no maintainer scripts.
+    Returns the number of files, 0 when not possible."""
+    import io
+    import tarfile
+    info = os.path.join(root, "var/lib/opkg/info")
+    control = read_file(os.path.join(info, name + ".control"))
+    listing = read_file(os.path.join(info, name + ".list"))
+    if not control or not listing:
+        return 0
+    files = []
+    total = 0
+    for line in listing.splitlines():
+        rel = line.split("\t")[0].strip().lstrip("/")
+        p = os.path.join(root, rel)
+        if not rel or ".." in rel.split("/") or not REPACK_OK.match(rel):
+            continue
+        if os.path.islink(p) or not os.path.isfile(p) or rel.endswith((".pyc", ".pyo")):
+            continue
+        files.append(rel)
+        total += os.path.getsize(p)
+        if total > max_bytes:
+            return 0
+    if not files:
+        return 0
+    keep = [l for l in control.splitlines() if l.strip() and not l.startswith(
+        ("Status:", "Installed-Time:", "Auto-Installed:", "Conffiles:", " /"))]
+    ctl = ("\n".join(keep) + "\n").encode("utf-8")
+
+    def tgz(add):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as t:
+            add(t)
+        return buf.getvalue()
+
+    def add_control(t):
+        ti = tarfile.TarInfo("./control")
+        ti.size, ti.mode, ti.mtime = len(ctl), 0o644, int(time.time())
+        t.addfile(ti, io.BytesIO(ctl))
+
+    def add_data(t):
+        for rel in files:
+            t.add(os.path.join(root, rel), "./" + rel, recursive=False)
+
+    blob = b"!<arch>\n" + _ar_member("debian-binary", b"2.0\n") + _ar_member("control.tar.gz", tgz(add_control)) \
+        + _ar_member("data.tar.gz", tgz(add_data))
+    with open(out_path, "wb") as f:
+        f.write(blob)
+    return len(files)
 
 
 def backup_summary(slot, layout=None):
@@ -2110,8 +2246,10 @@ def _run_tar(job, args, cwd, out_path, est_bytes, p0, p1):
     return rc, out
 
 
-def backup_custom(job, slot, keys, dest_mount, layout=None):
-    """Archive exactly the chosen categories of a slot into <dest>/WMultiBoot/backups."""
+def backup_custom(job, slot, keys, dest_mount, layout=None, plugins=None):
+    """Archive exactly the chosen categories of a slot into <dest>/WMultiBoot/backups.
+    plugins: the package names to keep (None = all installed). Plugins missing from the
+    feed (your own plugins, GitHub installs) are re-packed as .ipk inside the archive."""
     keys = [k for k in keys if k in CAT_TITLES]
     if not keys:
         raise MBError("Cochez au moins un élément à sauvegarder.")
@@ -2136,7 +2274,8 @@ def backup_custom(job, slot, keys, dest_mount, layout=None):
                     paths.append(p)
                     size += _tree_size(os.path.join(root, p))
                 job.check()
-            plugins = installed_plugins(root) if "plugins" in keys else []
+            have = installed_plugins(root) if "plugins" in keys else []
+            plugins = [n for n in have if plugins is None or n in plugins]
             if not paths and not plugins:
                 raise MBError("Rien à sauvegarder : ces éléments n'existent pas dans cette image.")
             need = size // MB + 50
@@ -2151,6 +2290,22 @@ def backup_custom(job, slot, keys, dest_mount, layout=None):
             if plugins:
                 write_file(os.path.join(meta_dir, PLUGIN_LIST), "\n".join(plugins) + "\n")
                 members.append(PLUGIN_LIST)
+                feed = feed_packages(root)
+                extra = [n for n in plugins if n not in feed] if feed else []
+                if extra:
+                    os.makedirs(os.path.join(meta_dir, IPK_DIR))
+                    for n in extra:
+                        job.check()
+                        job.say("Copie du plugin hors feed : %s" % n.replace("enigma2-plugin-", ""), 4)
+                        out_ipk = os.path.join(meta_dir, IPK_DIR, n + ".ipk")
+                        try:
+                            if not repack_ipk(root, n, out_ipk):
+                                remove_quiet(out_ipk)
+                        except Exception as e:
+                            log("repack %s: %s" % (n, e))
+                            remove_quiet(out_ipk)
+                    if os.listdir(os.path.join(meta_dir, IPK_DIR)):
+                        members.append(IPK_DIR)
             # manifest first (read back quickly), then the files of the image
             args = ["tar", "-czf", part, "-C", meta_dir] + members
             if paths:
@@ -2170,9 +2325,12 @@ def backup_custom(job, slot, keys, dest_mount, layout=None):
             sync()
     finally:
         remove_quiet(meta_dir)
+    job.last_backup = final
     job.say("Sauvegarde terminée.", 100)
-    return "Sauvegarde créée (%s) :\n%s\n\nContenu : %s" % (
-        human_bytes(os.path.getsize(final)), final, ", ".join(CAT_TITLES[k] for k in keys))
+    what = ", ".join(CAT_TITLES[k] for k in keys)
+    if plugins:
+        what += " (%d plugins)" % len(plugins)
+    return "Sauvegarde créée (%s) :\n%s\n\nContenu : %s" % (human_bytes(os.path.getsize(final)), final, what)
 
 
 def backup_settings(job, slot, dest_mount, layout=None):
@@ -2186,20 +2344,25 @@ def read_backup(path):
     name = os.path.basename(path)
     if "-backup-" in name and not name.startswith(("sauvegarde-", "reglages-")):
         return {"kind": "slot", "categories": {}, "manifest": {}}
-    cats, manifest = {}, {}
+    cats, manifest, plugins, ipks = {}, {}, [], []
     try:
         with tarfile.open(path, "r:gz") as t:
             for m in t:
                 c = classify(m.name)
-                if c == "meta" and m.isfile() and m.name.lstrip("./") == MANIFEST:
+                rel = m.name[2:] if m.name.startswith("./") else m.name
+                if c == "meta" and m.isfile() and rel == MANIFEST:
                     manifest = parse_kv(t.extractfile(m).read().decode("utf-8", "ignore"))
-                elif c == "meta" and m.name.lstrip("./") == PLUGIN_LIST:
-                    cats["plugins"] = len(t.extractfile(m).read().decode("utf-8", "ignore").split())
+                elif c == "meta" and m.isfile() and rel == PLUGIN_LIST:
+                    plugins = [n for n in t.extractfile(m).read().decode("utf-8", "ignore").split()
+                               if re.match(r"^[a-z0-9.+-]+$", n)]
+                    cats["plugins"] = len(plugins)
+                elif c == "meta" and m.isfile() and rel.startswith(IPK_DIR + "/"):
+                    ipks.append(os.path.basename(rel)[:-4])
                 elif c and c != "meta" and not m.isdir():
                     cats[c] = cats.get(c, 0) + 1
     except Exception:
         raise MBError("Sauvegarde corrompue ou illisible : %s" % name)
-    return {"kind": "custom", "categories": cats, "manifest": manifest}
+    return {"kind": "custom", "categories": cats, "manifest": manifest, "plugins": plugins, "ipks": ipks}
 
 
 def _safe_member(m):
@@ -2212,10 +2375,12 @@ def _safe_member(m):
     return True
 
 
-def restore_custom(job, archive, keys, slot, layout=None):
+def restore_custom(job, archive, keys, slot, layout=None, plugins=None):
     """Restore the chosen categories of a backup into a slot.
-    Another image: written directly. The running image: files are staged, then the GUI
-    is restarted by a detached script that copies them (Enigma2 must be stopped)."""
+    plugins: package names to reinstall (None = all listed in the backup).
+    Another image: files written directly; plugins are installed at its first start
+    (first-boot hook). The running image: files are staged, then the GUI is restarted
+    by a detached script that copies them (Enigma2 must be stopped)."""
     import tarfile
     keys = [k for k in keys if k in CAT_TITLES]
     if not keys:
@@ -2227,11 +2392,13 @@ def restore_custom(job, archive, keys, slot, layout=None):
         dest = "/"
     st = storage_for(archive)
     tmpd = work_dir(st["mount"], "tmp") if st else "/tmp"
-    stage = os.path.join(tmpd, "restore-%d" % int(time.time())) if running else None
+    stamp = int(time.time())
+    stage = os.path.join(tmpd, "restore-%d" % stamp) if running else None
+    ipk_tmp = None
     out_root = stage or dest
     if stage:
         os.makedirs(stage)
-    done, skipped, plugins = 0, 0, []
+    done, skipped, wanted_plugins, ipk_members = 0, 0, [], {}
     try:
         job.say("Lecture de la sauvegarde…", 5)
         with tarfile.open(archive, "r:gz") as t:
@@ -2239,21 +2406,40 @@ def restore_custom(job, archive, keys, slot, layout=None):
             for m in t:
                 job.check()
                 c = classify(m.name)
+                rel = m.name[2:] if m.name.startswith("./") else m.name
                 if c == "meta":
-                    if m.name.lstrip("./") == PLUGIN_LIST and "plugins" in keys:
-                        plugins = t.extractfile(m).read().decode("utf-8", "ignore").split()
+                    if rel == PLUGIN_LIST and "plugins" in keys and m.isfile():
+                        listed = [n for n in t.extractfile(m).read().decode("utf-8", "ignore").split()
+                                  if re.match(r"^[a-z0-9.+-]+$", n)]
+                        wanted_plugins = [n for n in listed if plugins is None or n in plugins]
+                    elif rel.startswith(IPK_DIR + "/") and m.isfile():
+                        ipk_members[os.path.basename(rel)[:-4]] = m.name
                     continue
                 if c in keys and _safe_member(m):
                     members.append(m)
                 elif c is None or not _safe_member(m):
                     skipped += 1
-        if not members and not plugins:
+        if not members and not wanted_plugins:
             raise MBError("Cette sauvegarde ne contient pas les éléments choisis.")
         job.say("Restauration de %d fichiers…" % len(members), 15)
+        ipk_out = None
+        if wanted_plugins:
+            if running:
+                ipk_tmp = os.path.join(tmpd, "ipk-%d" % stamp)
+                ipk_out = ipk_tmp
+            else:
+                ipk_out = os.path.join(dest, FIRSTBOOT_DIR, "ipk")
+        need_ipk = dict((ipk_members[n], n) for n in wanted_plugins if n in ipk_members)
         with tarfile.open(archive, "r:gz") as t:
             wanted = set(m.name for m in members)
             total = max(1, len(members))
             for m in t:
+                if m.name in need_ipk:
+                    if not os.path.isdir(ipk_out):
+                        os.makedirs(ipk_out)
+                    with open(os.path.join(ipk_out, need_ipk[m.name] + ".ipk"), "wb") as f:
+                        shutil.copyfileobj(t.extractfile(m), f)
+                    continue
                 if m.name not in wanted:
                     continue
                 job.check()
@@ -2271,12 +2457,19 @@ def restore_custom(job, archive, keys, slot, layout=None):
         msg = ["%d fichiers restaurés dans %s." % (done, "l'image en cours" if running else slot.title())]
         if skipped:
             msg.append("%d fichiers ignorés (non autorisés ou pas cochés)." % skipped)
-        if plugins:
+        if wanted_plugins:
             if running:
                 job.cancellable = True
-                msg.append(reinstall_plugins(job, plugins))
+                msg.append(reinstall_plugins(job, wanted_plugins, ipk_tmp))
             else:
-                msg.append("Plugins : démarrez sur cette image puis restaurez « Liste des plugins » pour les réinstaller.")
+                have = set(installed_plugins(dest))
+                todo = [n for n in wanted_plugins if n not in have]
+                if todo:
+                    install_firstboot_hook(dest, todo)
+                    msg.append("%d plugins seront installés automatiquement au premier démarrage de cette image "
+                               "(il faut Internet ; le démarrage est un peu plus long)." % len(todo))
+                else:
+                    msg.append("Plugins : tous déjà présents dans cette image.")
         if running and done:
             job.cancellable = False
             script = os.path.join(tmpd, "wmb-apply.sh")
@@ -2294,10 +2487,13 @@ def restore_custom(job, archive, keys, slot, layout=None):
     finally:
         if stage:
             remove_quiet(stage)
+        if ipk_tmp:
+            remove_quiet(ipk_tmp)
 
 
-def reinstall_plugins(job, names):
-    """opkg install of the listed plugins missing from the running image."""
+def reinstall_plugins(job, names, ipk_dir=None):
+    """opkg install (running image) of the listed plugins that are missing: from the feed,
+    else from the .ipk saved in the backup."""
     have = set(installed_plugins("/"))
     missing = [n for n in names if n not in have and re.match(r"^[a-z0-9.+-]+$", n)]
     if not missing:
@@ -2307,13 +2503,162 @@ def reinstall_plugins(job, names):
     ok, fail = [], []
     for i, n in enumerate(missing):
         job.check()
-        job.say("Installation de %s (%d/%d)…" % (n, i + 1, len(missing)), 80 + 18 * i // len(missing))
+        job.say("Installation de %s (%d/%d)…" % (n.replace("enigma2-plugin-", ""), i + 1, len(missing)),
+                80 + 18 * i // len(missing))
         rc, out = run(["opkg", "install", n], timeout=600)
+        local = os.path.join(ipk_dir, n + ".ipk") if ipk_dir else ""
+        if rc != 0 and local and os.path.isfile(local):
+            rc, out = run(["opkg", "install", local], timeout=600)
         (ok if rc == 0 else fail).append(n)
     text = "Plugins réinstallés : %d." % len(ok)
     if fail:
-        text += " Introuvables dans le feed : %s" % ", ".join(fail[:8]) + ("…" if len(fail) > 8 else "")
+        text += " Introuvables : %s" % ", ".join(f.replace("enigma2-plugin-", "") for f in fail[:8]) + ("…" if len(fail) > 8 else "")
     return text
+
+
+FIRSTBOOT_DIR = "etc/wmb-firstboot"
+FIRSTBOOT_SCRIPT = """#!/bin/sh
+# Wacayoub MultiBoot - first start of an updated/restored image: install the chosen
+# plugins once (from the feed, else from the saved .ipk), then remove itself.
+# Runs before Enigma2 starts; every step has a time limit so the boot can never hang.
+D=/%(dir)s
+rm -f /%(hook)s
+[ -f $D/plugins.txt ] || exit 0
+LOG=$D/opkg.log
+KEEP=/tmp/wmb-keep-$$.tgz
+( cd %(root)s && find etc/enigma2 etc/tuxbox/config -type f -size -2048k > $KEEP.lst 2>/dev/null
+  tar -czf $KEEP -T $KEEP.lst 2>/dev/null ) || rm -f $KEEP
+rm -f $KEEP.lst
+NET=0
+i=0
+while [ $i -lt 6 ]; do
+	if timeout 120 opkg update >>$LOG 2>&1; then NET=1; break; fi
+	i=$((i+1)); sleep 10
+done
+INST=0; FAIL=""
+for p in $(cat $D/plugins.txt); do
+	case "$p" in *[!a-z0-9.+-]*|"") continue;; esac
+	if opkg status "$p" 2>/dev/null | grep -q "install ok installed"; then continue; fi
+	if [ $NET = 1 ] && timeout 600 opkg install "$p" >>$LOG 2>&1; then INST=$((INST+1)); continue; fi
+	if [ -f "$D/ipk/$p.ipk" ] && timeout 300 opkg install "$D/ipk/$p.ipk" >>$LOG 2>&1; then INST=$((INST+1)); continue; fi
+	FAIL="$FAIL $p"
+done
+[ -f $KEEP ] && tar -xzf $KEEP -C %(root)s 2>/dev/null
+rm -f $KEEP
+printf 'installed=%%s\\nfailed=%%s\\nnetwork=%%s\\n' "$INST" "$FAIL" "$NET" > $D/result.txt
+rm -rf $D/ipk $D/plugins.txt
+sync
+exit 0
+"""
+
+
+def _default_runlevel(root):
+    m = re.search(r"^[^#:]*:(\d):initdefault:", read_file(os.path.join(root, "etc/inittab")), re.M)
+    return m.group(1) if m else "3"
+
+
+def install_firstboot_hook(root, names):
+    """Install the plugins of `names` at the first start of the image in root (not running)."""
+    if is_running_root(root):
+        raise MBError("Image en cours : les plugins sont installés tout de suite.")
+    names = [n for n in names if re.match(r"^[a-z0-9.+-]+$", n)]
+    rc = os.path.join(root, "etc/rc%s.d" % _default_runlevel(root))
+    if not os.path.isdir(rc):
+        raise MBError("Cette image n'a pas de dossier %s : plugins non programmés." % rc[len(root):])
+    hook_rel = "etc/rc%s.d/S98wmbfirstboot" % _default_runlevel(root)
+    d = os.path.join(root, FIRSTBOOT_DIR)
+    if not os.path.isdir(d):
+        os.makedirs(d)
+    prev = read_file(os.path.join(d, "plugins.txt")).split()
+    write_file(os.path.join(d, "plugins.txt"), "\n".join(sorted(set(prev + names))) + "\n")
+    remove_quiet(os.path.join(d, "result.txt"))
+    hook = os.path.join(root, hook_rel)
+    write_file(hook, FIRSTBOOT_SCRIPT % {"dir": FIRSTBOOT_DIR, "hook": hook_rel, "root": "/"})
+    os.chmod(hook, 0o755)
+    return hook_rel
+
+
+def firstboot_result(root="/"):
+    """Result of the first-boot plugin install of this image, read once (then removed)."""
+    p = os.path.join(root, FIRSTBOOT_DIR, "result.txt")
+    kv = parse_kv(read_file(p))
+    if not kv:
+        return None
+    remove_quiet(p)
+    fail = [f.replace("enigma2-plugin-", "") for f in kv.get("failed", "").split()]
+    text = "Wacayoub MultiBoot : %s plugins installés après la mise à jour." % kv.get("installed", "0")
+    if fail:
+        text += "\nNon trouvés : %s" % ", ".join(fail[:10])
+    if kv.get("network") != "1":
+        text += "\nPas d'Internet au démarrage : seuls les plugins sauvegardés en .ipk ont pu être installés."
+    return text
+
+
+def copy_self(root):
+    """Put this plugin into another image (so the updated image keeps it). No .pyc."""
+    src = os.path.dirname(os.path.abspath(__file__))
+    ext = os.path.join(root, "usr/lib/enigma2/python/Plugins/Extensions")
+    if not os.path.isdir(ext) or same_file(root, "/"):
+        return False
+    dst = os.path.join(ext, os.path.basename(src))
+    remove_quiet(dst)
+    shutil.copytree(src, dst, ignore=shutil.ignore_patterns("*.pyc", "*.pyo", "__pycache__"))
+    return True
+
+
+def find_update(catalog, slot):
+    """Newest stable catalog image of the slot's distribution: (item, is_newer) or (None, False)."""
+    info = slot.info or {}
+    key = distro_key(info.get("distro", ""))
+    if key == "unknown":
+        return None, False
+    best = None
+    for distro, its in catalog:
+        if distro_key(distro) != key:
+            continue
+        for it in its:
+            if it["eol"] or it["beta"] or "beta" in it["name"].lower():
+                continue
+            m = re.search(r"(20\d{6})", it["name"])
+            day = m.group(1) if m else time.strftime("%Y%m%d", time.localtime(it["date"] or 0))
+            if best is None or day > best[1]:
+                best = (it, day)
+    if not best:
+        return None, False
+    return best[0], best[1] > (info.get("date") or "0")
+
+
+def update_image(job, layout, src, image, target, keys, plugins, backup_mount, name=None):
+    """Smart update: back up the chosen elements of `src`, install `image` as a NEW slot,
+    restore everything into it and schedule the plugins for its first start.
+    The old image is never modified."""
+    job.say("Étape 1/4 : sauvegarde de « %s »…" % src.title(), 1)
+    backup_custom(job, src, keys, backup_mount, layout, plugins)
+    archive = job.last_backup
+    job.check()
+    job.say("Étape 2/4 : installation de la nouvelle image…", 0)
+    layout.install(job, image, target=target, name=name)
+    new_root = getattr(job, "new_root", None)
+    if not new_root or not os.path.isdir(new_root):
+        raise MBError("La nouvelle image est introuvable après l'installation.")
+    job.cancellable = False                         # the slot exists: finish the job
+    new = Slot("new", 0, layout.key if layout.key in ("chroot", "omb") else "chroot", root=new_root,
+               info=image_info(new_root), where=new_root)
+    job.say("Étape 3/4 : restauration de vos réglages dans la nouvelle image…", 0)
+    try:
+        res = restore_custom(job, archive, keys, new, layout, plugins)
+    except MBError as e:
+        raise MBError("La nouvelle image est installée mais la restauration a échoué : %s\n"
+                      "Votre sauvegarde est gardée : %s" % (e, archive))
+    job.say("Étape 4/4 : ajout de Wacayoub MultiBoot dans la nouvelle image…", 98)
+    try:
+        copy_self(new_root)
+    except Exception as e:
+        log("copy_self: %s" % e)
+    job.new_root = new_root
+    job.say("Mise à jour prête.", 100)
+    return ("Nouvelle image prête : %s\n%s\n\nL'ancienne image « %s » est gardée telle quelle.\nSauvegarde : %s"
+            % ((new.info or {}).get("label", os.path.basename(new_root)), res, src.title(), archive))
 
 
 def restore_settings(job, archive, dest_slot):

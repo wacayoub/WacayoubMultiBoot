@@ -37,6 +37,7 @@ G = {
     "archive": '<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8m-10 4h4"/>',
     "rotate": '<path d="M3 12a9 9 0 1 0 9-9a9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
     "check": '<path d="M20 6L9 17l-5-5"/>',
+    "up": '<circle cx="12" cy="12" r="10"/><path d="m16 12l-4-4l-4 4m4 4V8"/>',
     "shield": '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12l2 2l4-4"/>',
 }
 
@@ -287,7 +288,8 @@ def build(scale, sub):
                             ("drive", "#64748B", "a_size"), ("trash", "#EF4444", "a_delete"),
                             ("drive", "#0EA5E9", "a_disk"), ("shield", "#475569", "a_help"),
                             ("archive", "#F59E0B", "a_backups"), ("globe", "#22D3EE", "a_online"),
-                            ("link", "#A78BFA", "a_url"), ("folder", "#FBBF24", "a_file")):
+                            ("link", "#A78BFA", "a_url"), ("folder", "#FBBF24", "a_file"),
+                            ("up", "#22C55E", "a_update")):
         key_icon(name, col, S(64)).save(os.path.join(out, file + ".png"))
     cb = Image.new("RGBA", (S(44), S(44)), (0, 0, 0, 0))
     ImageDraw.Draw(cb).rounded_rectangle([1, 1, S(44) - 2, S(44) - 2], S(10), outline=(139, 152, 176, 255), width=max(2, S(3)))
@@ -309,12 +311,14 @@ def build(scale, sub):
     for name, col, file in (("archive", "#F59E0B", "m_restore"), ("save", "#3B82F6", "m_backup"),
                             ("globe", "#22D3EE", "m_install"), ("trash", "#EF4444", "m_manage"),
                             ("drive", "#0EA5E9", "m_space"), ("rotate", "#10B981", "m_refresh"),
-                            ("shield", "#8B5CF6", "m_help"), ("folder", "#64748B", "m_log")):
+                            ("shield", "#8B5CF6", "m_help"), ("folder", "#64748B", "m_log"),
+                            ("up", "#22C55E", "m_update")):
         key_icon(name, col, S(96)).save(os.path.join(out, file + ".png"))
     for key, text, col in (("running", "EN COURS", "#22C55E"), ("next", "PROCHAIN DÉMARRAGE", "#22D3EE"),
                            ("once", "UNE FOIS", "#F59E0B"), ("empty", "VIDE", "#94A3B8"),
                            ("recovery", "RECOVERY", "#A78BFA"), ("beta", "BÊTA", "#F59E0B"),
-                           ("eol", "FIN DE SUPPORT", "#94A3B8"), ("release", "STABLE", "#22C55E")):
+                           ("eol", "FIN DE SUPPORT", "#94A3B8"), ("release", "STABLE", "#22C55E"),
+                           ("new", "NOUVEAU", "#22C55E"), ("uptodate", "À JOUR", "#94A3B8")):
         pill(text, col, S(38)).save(os.path.join(out, "p_%s.png" % key))
 
 
