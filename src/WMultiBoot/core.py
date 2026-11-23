@@ -23,7 +23,7 @@ import threading
 import time
 import zipfile
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 LOG_FILE = "/tmp/wmultiboot.log"
 DATA_DIR = "WMultiBoot"                     # <device>/WMultiBoot/{downloads,backups,tmp}
 CHROOT_BASES = ("OnlineMultiBoot/images", "open-multiboot", "ImageBoot", "WMultiBoot/images")
@@ -2060,6 +2060,7 @@ CATEGORIES = (
     ("softcam", "Softcam", "configs OSCam/CCcam et clés", "contient vos identifiants"),
     ("network", "Réseau", "interfaces, Wi-Fi, DNS, nom du récepteur", "contient le mot de passe Wi-Fi"),
     ("picons", "Picons", "logos des chaînes du dossier /picon", ""),
+    ("addons", "Ajouts installés à la main", "skins et fichiers de plugins copiés sans paquet", ""),
 )
 CAT_TITLES = dict((c[0], c[1]) for c in CATEGORIES)
 E2 = "etc/enigma2/"
@@ -2068,6 +2069,10 @@ NETWORK_FILES = ("etc/network/interfaces", "etc/wpa_supplicant.conf", "etc/wpa_s
                  "etc/wpa_supplicant.wlan1.conf", "etc/resolv.conf", "etc/hostname", "etc/hosts")
 SOFTCAM_PATHS = ("etc/tuxbox/config", "etc/CCcam.cfg", "usr/keys", "etc/oscam", "var/keys")
 PICON_DIRS = ("picon", "usr/share/enigma2/picon")
+# hand-installed skins/plugins: files there that no opkg package owns
+ADDON_DIRS = ("usr/lib/enigma2/python/Plugins", "usr/lib/enigma2/python/Components", "usr/share/enigma2")
+ADDON_RE = re.compile(r"^(usr/lib/enigma2/python/(Plugins|Components)/|usr/share/enigma2/)")
+ADDON_LIST = "wmb-addons.lst"
 MANIFEST = "wmb-manifest.txt"
 PLUGIN_LIST = "wmb-plugins.txt"
 # never restored, whatever the archive says (boot scripts were the malware vector)
@@ -2084,7 +2089,16 @@ def classify(rel):
     """Category of a path relative to the image root, or None (never backed up/restored)."""
     rel = rel[2:] if rel.startswith("./") else rel
     rel = rel.rstrip("/")
-    if not rel or ".." in rel.split("/") or rel.startswith("/") or FORBIDDEN.match(rel):
+    if not rel or ".." in rel.split("/") or rel.startswith("/"):
+        return None
+    for p in PICON_DIRS:
+        if rel == p or rel.startswith(p + "/"):
+            return "picons"
+    if ADDON_RE.match(rel + "/"):
+        if "Extensions/WMultiBoot" in rel or any(_skip_name(x) for x in rel.split("/")):
+            return None
+        return "addons"
+    if FORBIDDEN.match(rel):
         return None
     if rel in (MANIFEST, PLUGIN_LIST) or (rel.startswith(IPK_DIR + "/") and rel.count("/") == 1 and rel.endswith(".ipk")):
         return "meta"
@@ -2111,6 +2125,65 @@ def classify(rel):
         if rel == p or rel.startswith(p + "/"):
             return "picons"
     return None
+
+
+def _owned_files(root):
+    """Paths (relative) that an installed opkg package owns in this image."""
+    owned = set()
+    for info in ("var/lib/opkg/info", "usr/lib/opkg/info"):
+        d = os.path.join(root, info)
+        try:
+            names = os.listdir(d)
+        except Exception:
+            continue
+        for n in names:
+            if n.endswith(".list"):
+                for line in read_file(os.path.join(d, n)).splitlines():
+                    line = line.split("\t")[0].strip().lstrip("/")
+                    if line:
+                        owned.add(line)
+    return owned
+
+
+def _is_elf(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"\x7fELF"
+    except Exception:
+        return False
+
+
+def addon_paths(root, job=None):
+    """Hand-installed files (skins, plugin files copied without a package): files under
+    ADDON_DIRS that no package owns. Programs (ELF) are left out on purpose.
+    Returns (files, size, skipped_programs)."""
+    owned = _owned_files(root)
+    if not owned:
+        return [], 0, []                    # no package database: cannot tell, keep nothing
+    files, size, elf = [], 0, []
+    for top in ADDON_DIRS:
+        base = os.path.join(root, top)
+        for dp, dn, fn in os.walk(base):
+            if job:
+                job.check()
+            reld = os.path.relpath(dp, root)
+            dn[:] = sorted(d for d in dn if classify(reld + "/" + d) == "addons"
+                           and not os.path.islink(os.path.join(dp, d)))
+            for f in sorted(fn):
+                rel = reld + "/" + f
+                if rel in owned or classify(rel) != "addons":
+                    continue
+                full = os.path.join(dp, f)
+                if not os.path.islink(full):
+                    if _is_elf(full):
+                        elf.append(rel)
+                        continue
+                    try:
+                        size += os.path.getsize(full)
+                    except Exception:
+                        continue
+                files.append(rel)
+    return files, size, elf
 
 
 def category_paths(root, key):
@@ -2373,12 +2446,18 @@ def backup_custom(job, slot, keys, dest_mount, layout=None, plugins=None):
     meta_dir = os.path.join(tmpd, "meta-%d" % os.getpid())
     remove_quiet(meta_dir)
     os.makedirs(meta_dir)
+    addons, addon_elf = [], []
+    lst = os.path.join(tmpd, "addons-%d.lst" % os.getpid())
     try:
         with _slot_root_ctx(slot, layout) as root:
             job.say("Préparation : %s" % ", ".join(CAT_TITLES[k] for k in keys), 3)
             paths, size = [], 0
+            if "addons" in keys:
+                job.say("Recherche des ajouts installés à la main…", 3)
+                addons, asize, addon_elf = addon_paths(root, job)
+                size += asize
             for k in keys:
-                if k == "plugins":
+                if k in ("plugins", "addons"):
                     continue
                 for p in category_paths(root, k):
                     paths.append(p)
@@ -2386,7 +2465,7 @@ def backup_custom(job, slot, keys, dest_mount, layout=None, plugins=None):
                 job.check()
             have = installed_plugins(root) if "plugins" in keys else []
             plugins = [n for n in have if plugins is None or n in plugins]
-            if not paths and not plugins:
+            if not paths and not plugins and not addons:
                 raise MBError("Rien à sauvegarder : ces éléments n'existent pas dans cette image.")
             need = size // MB + 50
             free, _ = fs_usage(dest_mount)
@@ -2421,6 +2500,9 @@ def backup_custom(job, slot, keys, dest_mount, layout=None, plugins=None):
             if paths:
                 args += ["-C", root, "--exclude=*backup*", "--exclude=*.bak", "--exclude=epg.dat",
                          "--exclude=*.tar.gz"] + ["./" + p for p in paths]
+            if addons:
+                write_file(lst, "".join("./%s\n" % a for a in addons))
+                args += ["-C", root, "-T", lst]
             job.say("Sauvegarde de %s…" % human_bytes(size), 8)
             rc, out = _run_tar(job, args, None, part, size * 0.5 + 1, 8, 97)
             if job.cancelled:
@@ -2435,11 +2517,16 @@ def backup_custom(job, slot, keys, dest_mount, layout=None, plugins=None):
             sync()
     finally:
         remove_quiet(meta_dir)
+        remove_quiet(lst)
     job.last_backup = final
     job.say("Sauvegarde terminée.", 100)
     what = ", ".join(CAT_TITLES[k] for k in keys)
     if plugins:
         what += " (%d plugins)" % len(plugins)
+    if addons:
+        what += " (%d fichiers ajoutés à la main)" % len(addons)
+    if addon_elf:
+        what += "\n%d programmes non sauvegardés par sécurité (à réinstaller avec leur plugin)." % len(addon_elf)
     return "Sauvegarde créée (%s) :\n%s\n\nContenu : %s" % (human_bytes(os.path.getsize(final)), final, what)
 
 
@@ -2508,7 +2595,7 @@ def restore_custom(job, archive, keys, slot, layout=None, plugins=None):
     out_root = stage or dest
     if stage:
         os.makedirs(stage)
-    done, skipped, wanted_plugins, ipk_members = 0, 0, [], {}
+    done, skipped, kept, wanted_plugins, ipk_members = 0, 0, 0, [], {}
     try:
         job.say("Lecture de la sauvegarde…", 5)
         with tarfile.open(archive, "r:gz") as t:
@@ -2526,6 +2613,9 @@ def restore_custom(job, archive, keys, slot, layout=None, plugins=None):
                         ipk_members[os.path.basename(rel)[:-4]] = m.name
                     continue
                 if c in keys and _safe_member(m):
+                    if c == "addons" and os.path.lexists(os.path.join(dest, rel)):
+                        kept += 1                   # the target image already has it: keep its own
+                        continue
                     members.append(m)
                 elif c is None or not _safe_member(m):
                     skipped += 1
@@ -2567,6 +2657,8 @@ def restore_custom(job, archive, keys, slot, layout=None, plugins=None):
         msg = ["%d fichiers restaurés dans %s." % (done, "l'image en cours" if running else slot.title())]
         if skipped:
             msg.append("%d fichiers ignorés (non autorisés ou pas cochés)." % skipped)
+        if kept:
+            msg.append("%d ajouts déjà présents dans l'image : gardés tels quels." % kept)
         if wanted_plugins:
             if running:
                 job.cancellable = True

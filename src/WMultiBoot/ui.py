@@ -1542,7 +1542,7 @@ class WMBMain(Base):
             if not job.ok:
                 return
             summary, (details, feed) = job.result
-            risky = ("settings", "plugins_conf", "plugins")
+            risky = ("settings", "plugins_conf", "plugins", "addons")
             items = []
             for key, title, desc, warn, size, avail in summary:
                 sub = desc + ("  ·  " + core.human_bytes(size) if size else "")

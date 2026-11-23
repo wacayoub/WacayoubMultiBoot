@@ -759,19 +759,66 @@ def t_update_image():
     assert not leftovers("/media/wmbtest")
 
 
+def t_addons_backup_restore():
+    """Hand-installed skins/plugin files (owned by no package) are backed up, programs are not,
+    and a restore never overwrites a file the target image already has."""
+    z = make_zip("/media/wmbtest/addons.zip", rootfs=make_rootfs())
+    lay = chroot_layout()
+    job = FakeJob("i")
+    lay.install(job, z, target=target("/media/wmbtest"))
+    lay = chroot_layout()
+    slot = [s for s in lay.slots if s.root == job.new_root][0]
+    R = slot.root
+    def put(rel, data):
+        p = os.path.join(R, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(data)
+    info = os.path.join(R, "var/lib/opkg/info")
+    os.makedirs(info, exist_ok=True)
+    with open(os.path.join(info, "enigma2-plugin-skins-x.list"), "w") as f:
+        f.write("/usr/share/enigma2/SkinX/skin.xml\n/usr/lib/enigma2/python/Components/Renderer/XR.py\t0644\n")
+    put("usr/share/enigma2/SkinX/skin.xml", b"<skin/>")                      # owned -> not an addon
+    put("usr/lib/enigma2/python/Components/Renderer/XR.py", b"# owned")      # owned
+    put("usr/share/enigma2/MySkin/skin.xml", b"<skin>mine</skin>")           # hand-installed
+    put("usr/lib/enigma2/python/Components/MySkin/extra.py", b"x = 1\n")     # hand-installed
+    put("usr/lib/enigma2/python/Components/MySkin/only.pyc", b"\x00pyc")     # sourceless file
+    put("usr/lib/enigma2/python/Plugins/Extensions/Hand/plugin.py", b"# hand")
+    put("usr/lib/enigma2/python/Plugins/Extensions/Hand/tool.so", b"\x7fELF....")  # program -> left out
+    put("usr/share/enigma2/MySkin/old-backup/a.png", b"x")                   # backup folder -> left out
+    files, size, elf = core.addon_paths(R)
+    assert "usr/share/enigma2/MySkin/skin.xml" in files, files
+    assert "usr/lib/enigma2/python/Components/MySkin/only.pyc" in files
+    assert "usr/lib/enigma2/python/Plugins/Extensions/Hand/plugin.py" in files
+    assert "usr/share/enigma2/SkinX/skin.xml" not in files and "usr/lib/enigma2/python/Components/Renderer/XR.py" not in files
+    assert elf == ["usr/lib/enigma2/python/Plugins/Extensions/Hand/tool.so"], elf
+    assert not any("backup" in f for f in files), files
+    assert core.classify("usr/bin/evil") is None and core.classify("usr/lib/libx.so") is None
+    msg = core.backup_custom(FakeJob("b"), slot, ["addons"], "/media/wmbtest", lay)
+    assert "ajoutés à la main" in msg and "programmes non sauvegardés" in msg, msg
+    bk = sorted(b["path"] for b in core.list_backups() if b["mount"] == "/media/wmbtest" and b["kind"] == "custom")[-1]
+    with tarfile.open(bk) as t:
+        names = [n[2:] if n.startswith("./") else n for n in t.getnames()]
+    assert "usr/share/enigma2/MySkin/skin.xml" in names and not any(n.endswith("tool.so") for n in names), names
+    assert core.read_backup(bk)["categories"].get("addons") == len(files), core.read_backup(bk)["categories"]
+    # restore: a missing addon comes back, an existing file is kept as it is
+    core.remove_quiet(os.path.join(R, "usr/lib/enigma2/python/Components/MySkin/extra.py"))
+    put("usr/share/enigma2/MySkin/skin.xml", b"<skin>newer</skin>")
+    msg = core.restore_custom(FakeJob("r"), bk, ["addons"], slot, lay)
+    assert core.read_file(os.path.join(R, "usr/lib/enigma2/python/Components/MySkin/extra.py")) == "x = 1\n", msg
+    assert core.read_file(os.path.join(R, "usr/share/enigma2/MySkin/skin.xml")) == "<skin>newer</skin>", msg
+    assert "gardés tels quels" in msg, msg
+    core.remove_quiet(bk)
+
+
 def t_remote_job_status():
     """A job run outside Enigma2 publishes its state; RemoteJob follows it to the end."""
     import json, time
-    code = ("import sys,time,importlib.util
-"
-            "sp=importlib.util.spec_from_file_location('c', %r); c=importlib.util.module_from_spec(sp); sp.loader.exec_module(c)
-"
-            "j=c.Job('Test SSH')
-"
-            "j.start(lambda j:(j.say('etape 1',10),time.sleep(3),j.say('etape 2',60),time.sleep(3),'fini')[-1])
-"
-            "while not j.done: time.sleep(0.2)
-") % sys.argv[1]
+    code = ("import sys,time,importlib.util\n"
+            "sp=importlib.util.spec_from_file_location('c', %r); c=importlib.util.module_from_spec(sp); sp.loader.exec_module(c)\n"
+            "j=c.Job('Test SSH')\n"
+            "j.start(lambda j:(j.say('etape 1',10),time.sleep(3),j.say('etape 2',60),time.sleep(3),'fini')[-1])\n"
+            "while not j.done: time.sleep(0.2)\n") % sys.argv[1]
     p = subprocess.Popen([sys.executable, "-c", code])
     time.sleep(1.5)
     mine = [d for d in core.foreign_jobs() if d["pid"] == p.pid]
@@ -801,7 +848,7 @@ TESTS = [t_detect_real, t_running_guards, t_install_backup_restore_delete, t_loc
          t_cancel_install, t_bad_urls, t_unknown_box, t_no_multiboot_no_slots, t_startup_layout,
          t_omb_classic_layout, t_catalog_parse, t_backups_settings_channels, t_custom_backup_restore,
          t_plugin_tools, t_backup_restore_plugin_choice, t_firstboot_script, t_find_update, t_update_image,
-         t_remote_job_status, t_no_temp_mounts_left]
+         t_addons_backup_restore, t_remote_job_status, t_no_temp_mounts_left]
 
 if __name__ == "__main__":
     flash_conf_before = None
