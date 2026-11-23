@@ -55,6 +55,7 @@ DISTROS = {
     "opendroid": ("OD", "#3F6212", "#A3E635"),
     "satlodge": ("SL", "#78350F", "#FBBF24"),
     "dreamos": ("DM", "#1F2937", "#9CA3AF"),
+    "neutrino": ("NI", "#0F172A", "#F59E0B"),
     "unknown": (None, "#334155", "#64748B"),
 }
 

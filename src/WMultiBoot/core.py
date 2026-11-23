@@ -23,7 +23,7 @@ import threading
 import time
 import zipfile
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 LOG_FILE = "/tmp/wmultiboot.log"
 DATA_DIR = "WMultiBoot"                     # <device>/WMultiBoot/{downloads,backups,tmp}
 CHROOT_BASES = ("OnlineMultiBoot/images", "open-multiboot", "ImageBoot", "WMultiBoot/images")
@@ -1200,6 +1200,40 @@ def parse_catalog(text, distro):
     return items
 
 
+# Distributions that publish a plain folder listing (Apache autoindex) instead of JSON.
+INDEX_FEEDS = (("Neutrino (NI)", "https://neutrino-images.de/neutrino-images/nightly/"),
+               ("Neutrino (NI) release", "https://neutrino-images.de/neutrino-images/release/"))
+
+
+def parse_index(html, base, distro, machine):
+    """Multiboot zips for this machine in an autoindex page -> [item]."""
+    items = []
+    seen = set()
+    for m in re.finditer(r'href="([^"?#]+\.zip)"', html):
+        name = m.group(1).split("/")[-1]
+        low = name.lower()
+        if name in seen or not re.search(r"(^|[-_])%s([-_.]|$)" % re.escape(machine.lower()), low):
+            continue
+        if not ("usb" in low or "multi" in low):
+            continue
+        seen.add(name)
+        tail = html[m.end():m.end() + 400]
+        size = 0
+        sm = re.search(r">\s*([\d.]+)\s*([KMG])\s*<", tail)
+        if sm:
+            size = int(float(sm.group(1)) * {"K": 1024, "M": MB, "G": 1024 * MB}[sm.group(2)])
+        dm = re.search(r"(20\d{6})", name)
+        date = int(time.mktime(time.strptime(dm.group(1), "%Y%m%d"))) if dm else 0
+        link = m.group(1) if m.group(1).startswith("http") else base.rstrip("/") + "/" + m.group(1).lstrip("/")
+        if not re.match(r"^https?://[^\s'\"<>]+\.zip$", link):
+            continue
+        items.append({"distro": distro, "group": "nightly" if "nightly" in base else "release", "name": name,
+                      "url": link, "size": size, "date": date, "day": fmt_date(dm.group(1)) if dm else "",
+                      "eol": False, "beta": "nightly" in base})
+    items.sort(key=lambda i: -i["date"])
+    return items
+
+
 def fetch_catalog(job, machine):
     """Online images for this receiver, like the Octagon / OpenATV flash-online list.
     Returns [(distro, [items])], OpenATV first."""
@@ -1207,7 +1241,8 @@ def fetch_catalog(job, machine):
         raise MBError("Modèle du récepteur inconnu : liste d'images en ligne indisponible.")
     if not os.path.isdir(CATALOG_DIR):
         os.makedirs(CATALOG_DIR)
-    sources = [("OpenATV", OPENATV_JSON % machine)] + [(n, u % machine) for n, u in EXTRA_FEEDS]
+    sources = [("OpenATV", OPENATV_JSON % machine)] + [(n, u % machine) for n, u in EXTRA_FEEDS] + list(INDEX_FEEDS)
+    index_names = set(n for n, _ in INDEX_FEEDS)
     job.say("Recherche des distributions disponibles…", 5)
     dl = os.path.join(CATALOG_DIR, "distros.json")
     if _fetch(DISTROS_JSON % machine, dl):
@@ -1225,7 +1260,10 @@ def fetch_catalog(job, machine):
         dest = os.path.join(CATALOG_DIR, "%d.json" % n)
         try:
             if _fetch(url, dest):
-                results[n] = parse_catalog(read_file(dest), distro)
+                if distro in index_names:
+                    results[n] = parse_index(read_file(dest), url, distro.replace(" release", ""), machine)
+                else:
+                    results[n] = parse_catalog(read_file(dest), distro)
         except Exception as e:
             log("catalog %s: %s" % (distro, e))
         remove_quiet(dest)
@@ -1242,11 +1280,23 @@ def fetch_catalog(job, machine):
             job.check()
             t.join(0.3)
             job.set_progress(15 + 80 * sum(1 for x in threads if not x.is_alive()) // len(threads))
-    out = [(sources[n][0], items) for n, items in enumerate(results) if items]
-    if not out:
+    merged = []
+    for n, items in enumerate(results):
+        if items is None:                       # source unreachable: not listed
+            continue
+        name = sources[n][0].replace(" release", "")
+        for d, its in merged:
+            if d == name:
+                its.extend(items)
+                its.sort(key=lambda i: (i["eol"], i["beta"], -i["date"]))
+                break
+        else:
+            merged.append((name, list(items)))
+    out = [x for x in merged if x[1]] + [x for x in merged if not x[1]]   # empty ones last
+    if not [x for x in out if x[1]]:
         raise MBError("Aucune image en ligne trouvée pour %s (pas de connexion Internet ?)." % machine)
     total = sum(len(i) for _, i in out)
-    job.say("%d images trouvées dans %d distributions." % (total, len(out)), 100)
+    job.say("%d images trouvées dans %d distributions." % (total, len([x for x in out if x[1]])), 100)
     return out
 
 
@@ -1773,7 +1823,7 @@ def install_capacity():
     return out
 
 
-DISTRO_KEYS = ("openatv", "openpli", "openvix", "openbh", "openspa", "egami", "teamblue", "openhdf",
+DISTRO_KEYS = ("neutrino", "openatv", "openpli", "openvix", "openbh", "openspa", "egami", "teamblue", "openhdf",
                "pure2", "openvision", "opendroid", "satlodge", "dreamos")
 
 

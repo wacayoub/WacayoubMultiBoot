@@ -1,9 +1,18 @@
 # Wacayoub MultiBoot
 
 Gestionnaire multiboot pour Enigma2, inspiré du « Multiboot Manager » d'Octagon (fonctions seulement, code écrit de zéro).
-Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.3.0_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
+Paquet : `packages/enigma2-plugin-extensions-wmultiboot_1.3.1_all.ipk` (Python 2.7 et 3.x, `Architecture: all`).
 
 Ouverture : Menu Plugins, menu Extensions, ou Menu > Système.
+
+## Nouveautés 1.3.1
+
+- Images en ligne : ajout de **Neutrino (NI)** (neutrino-images.de, nightly + release, lu depuis la liste du dossier).
+  Neutrino n'est pas Enigma2 : il démarre en multiboot comme les autres, mais sans vos plugins Enigma2.
+- Les distributions sans image pour votre récepteur (EGAMI, teamBlue, OpenHDF…) apparaissent grisées « VIDE ».
+- Pas ajoutées (pas de liste publique utilisable) : HD Satelit (seulement Amiko Viper 4K), TNAP (pas de Vu+),
+  PKT Hyperion (abandonné), BPanther Neutrino (refuse les téléchargements automatiques, erreur 403),
+  VTi (compte forum nécessaire). Elles restent installables avec « Adresse internet (URL) » ou un fichier zip.
 
 ## Nouveautés 1.3.0
 

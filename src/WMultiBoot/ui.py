@@ -1109,7 +1109,7 @@ class WMBMain(Base):
     @safe
     def pick_source(self):
         items = [dict(icon="a_online", title="Images en ligne", value=("online", None),
-                      sub="OpenATV, OpenPLi, OpenViX, PurE2, OpenBH, OpenSPA… pour %s" % self.mbl.box["machine"]),
+                      sub="OpenATV, OpenPLi, OpenViX, PurE2, OpenSPA, Neutrino… pour %s" % self.mbl.box["machine"]),
                  dict(icon="a_url", title="Adresse internet (URL)", value=("url", None),
                       sub="Lien direct vers un fichier .zip")]
         for label, path, size in core.find_local_images()[:30]:
@@ -1159,14 +1159,22 @@ class WMBMain(Base):
     def pick_distro(self, catalog):
         items = []
         for d, its in catalog:
-            last = its[0]
-            items.append(dict(icon="d_" + core.distro_key(d), title=d, value=(d, its),
-                              sub="%d images  ·  dernière : %s" % (len(its), last["day"])))
+            if its:
+                sub = "%d images  ·  dernière : %s" % (len(its), its[0]["day"])
+                if core.distro_key(d) == "neutrino":
+                    sub += "  ·  pas Enigma2 (menus et plugins différents)"
+                items.append(dict(icon="d_" + core.distro_key(d), title=d, value=(d, its), sub=sub))
+            else:
+                items.append(dict(icon="d_" + core.distro_key(d), title=d, value=(d, its), pill="p_empty",
+                                  sub="Aucune image publiée pour %s" % self.mbl.box["machine"]))
         self.mb_pick("Images en ligne", items, self.pick_online, "Pour %s  ·  choisissez une distribution" % self.mbl.box["machine"])
 
     @safe
     def pick_online(self, value):
         distro, its = value
+        if not its:
+            self.mb_info("%s ne publie pas d'image pour %s.\nChoisissez une autre distribution." % (distro, self.mbl.box["machine"]))
+            return
         items = []
         for it in its[:60]:
             pill = "p_eol" if it["eol"] else ("p_beta" if (it["beta"] or "beta" in it["name"].lower()) else "p_release")
@@ -1233,6 +1241,9 @@ class WMBMain(Base):
                             "(retour automatique sur l'image actuelle ensuite)",
                             lambda: self.run_job("Choix du démarrage", lambda j: self.mbl.set_next(j, new, True),
                                                  self.ask_reboot))
+        if core.distro_key((new.info or {}).get("distro", "")) in ("neutrino", "unknown"):
+            offer_boot()
+            return
         self.mb_ask("Copier vos chaînes, favoris et satellites dans la nouvelle image ?",
                     lambda: self.run_job("Copie des chaînes", lambda j: core.copy_channels(j, new),
                                          lambda j: offer_boot(), rescan=False),
